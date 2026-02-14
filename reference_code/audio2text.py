@@ -38,13 +38,13 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('audio2summary.log', encoding='utf-8'),
+        logging.FileHandler('audio2text.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class Audio2Summary:
+class Audio2Text:
     def __init__(self, config_path: str = "D:\\QwenASR\\config.json"):
         """初始化配置"""
         with open(config_path, 'r', encoding='utf-8') as f:

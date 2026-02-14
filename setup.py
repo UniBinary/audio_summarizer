@@ -19,7 +19,7 @@ setup(
 
     packages=find_packages(),
     package_data={
-        "audio_summarizer": ["assets/*",]
+        "audiosummarizer": ["assets/*",]
     },
 
     python_requires=">=3.8",
@@ -32,7 +32,8 @@ setup(
     entry_points={
         "console_scripts": [
             # 将脚本暴露为命令行工具，修改为你项目的入口函数
-            "audio_summarizer=audio_summarizer.main:main",
+            "audiosummarizer=audiosummarizer.main:summarize",
+            "sumaudio=audiosummarizer.main:summarize"
         ]
     },
 
@@ -54,7 +55,7 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
-        "Operating System :: OS Independent"
+        "Operating System :: Microsoft :: Windows"
     ],
 
     # metadata for upload
