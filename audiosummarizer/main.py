@@ -89,7 +89,7 @@ def summarize(input_dir : str, output_dir : str, processes : int = 1, audio_only
             logger=logger,
             ffmpeg_path=ffmpeg_path,
             output_dir=interm_dir / "audios",
-            input_json=interm_dir / "audios.json",
+            input_json=interm_dir / "inputs.json",
             num_processes=processes
         )
         # 开始处理

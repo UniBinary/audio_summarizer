@@ -19,18 +19,18 @@ class AudioFinder:
         '.mpg', '.mpeg'
     }
     
-    def __init__(self, logger, input_dir: Path, output_dir: Path):
+    def __init__(self, logger, input_dir: Path, output_json: Path):
         """
         初始化音频查找器
         
         Args:
             logger: 日志记录器对象
             input_dir: 输入目录路径，递归遍历此目录寻找音视频文件
-            output_dir: 输出目录路径，将JSON文件存储在此目录
+            output_json: 输出JSON文件路径
         """
         self.logger = logger
         self.input_dir = input_dir
-        self.output_dir = output_dir
+        self.output_json = output_json
         
         # 存储类内数据
         self.audio_files: List[str] = []
@@ -168,24 +168,12 @@ class AudioFinder:
         """
         try:
             # 准备输出文件路径
-            output_file = self.output_dir / "audios.json"
-            
-            # 准备要保存的数据
-            data = {
-                "metadata": {
-                    "input_directory": str(self.input_dir.absolute()),
-                    "output_directory": str(self.output_dir.absolute()),
-                    "total_files": self.total_files_found,
-                    "processed_directories": len(self.processed_dirs),
-                    "skipped_directories": len(self.skipped_dirs),
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-                },
-                "audio_files": self.audio_files
-            }
+            output_file = self.output_json
+            output_file.parent.mkdir(parents=True, exist_ok=True)
             
             # 写入JSON文件
             with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(self.audio_files, f, ensure_ascii=False, indent=2)
             
             self.logger.info(f"JSON文件已保存: {output_file}")
             self.logger.info(f"共找到 {self.total_files_found} 个音视频文件")
@@ -270,37 +258,34 @@ class AudioFinder:
 
 
 class AudioExtractor:
-    VIDEO_EXTENSIONS = {
-        # 视频格式
-        '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v',
-        '.mpg', '.mpeg'
-    }
-
     AUDIO_EXTENSIONS = {
         # 音频格式
         '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus'
     }
 
-    def __init__(self, ffmpeg_path, output_dir, logger, input_json=None, num_processes=None):
+    def __init__(self, logger, ffmpeg_path : Path, output_dir : Path, input_json : Path, output_json : Path, num_processes : int = 1):
         """
         初始化音频提取器
         
         Args:
+            logger: 日志记录器对象
             ffmpeg_path: ffmpeg可执行文件路径
             output_dir: 输出目录路径
-            logger: 日志记录器对象
             input_json: 输入JSON文件路径（包含视频列表）
-            num_processes: 并行进程数，默认为CPU核心数
+            output_json: 输出JSON文件路径
+            num_processes: 并行进程数，默认为CPU核心数，默认为1，表示不使用并行
         """
         self.ffmpeg_path = ffmpeg_path
         self.output_dir = output_dir
         self.logger = logger
         self.input_json = input_json
+        self.output_json = output_json
         self.num_processes = num_processes
         
         # 初始化类内变量
         self.video_paths = []
         self.missing_videos = []
+        self.already_an_audio = []
         self.total_duration = 0
         self.total_files = 0
         self.success_count = 0
@@ -326,14 +311,13 @@ class AudioExtractor:
     
     def _load_video_list(self):
         """从JSON文件加载视频列表"""
-        if not self.input_json or not self.input_json.exists():
-            self.logger.error(f"输入文件未找到: {self.input_json}")
-            return False
-        
         self.logger.info(f"读取视频列表: {self.input_json}")
         try:
-            with open(self.input_json, 'r', encoding='utf-8-sig') as f:
+            with open(str(self.input_json), 'r', encoding='utf-8-sig') as f:
                 self.video_paths = json.load(f)
+        except FileNotFoundError:
+            self.logger.error(f"输入JSON文件不存在: {self.input_json}")
+            return False
         except Exception as e:
             self.logger.error(f"读取JSON文件失败: {e}")
             return False
@@ -401,7 +385,8 @@ class AudioExtractor:
         if input_path.suffix.lower() in self.AUDIO_EXTENSIONS:
             if input_path.exists():
                 audio_duration = self._get_duration(input_path) or 0
-                size = input_path.stat().st_size if input_path.exists() else 0
+                size = input_path.stat().st_size
+                self.already_an_audio.append(input_path)
                 return idx, True, "输入为音频，跳过", str(input_path), size, audio_duration
             else:
                 return idx, False, "输入音频文件不存在", "", 0, 0
@@ -483,6 +468,17 @@ class AudioExtractor:
                     actual = set(numbers)
                     missing = sorted(list(expected - actual))
                     
+                    skipped = set()
+                    for already in self.already_an_audio:
+                        try:
+                            num = self.video_paths.index(str(already)) + 1  # 视频列表索引 +1 对应编号
+                            skipped.add(num)
+                        except:
+                            pass
+
+                    # 从缺失编号中排除已跳过的编号
+                    missing = [num for num in missing if num not in skipped]
+
                     if missing:
                         self.logger.warning(f"缺失编号: {len(missing)} 个")
                         for num in missing[:10]:
@@ -587,24 +583,17 @@ class AudioExtractor:
         # 将成功提取的音频路径写回输入 JSON（保持索引一致）
         if extracted_map and self.input_json and self.input_json.exists():
             try:
-                with open(self.input_json, 'r', encoding='utf-8-sig') as f:
+                with open(str(self.input_json), 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                 # 确保 data 是列表
                 if isinstance(data, list):
                     for idx, audio_path in extracted_map.items():
                         if 0 <= idx < len(data):
                             data[idx] = audio_path
-                    # 备份原文件（可选）
-                    try:
-                        backup = self.input_json.with_suffix(self.input_json.suffix + '.bak')
-                        with open(backup, 'w', encoding='utf-8') as b:
-                            json.dump(json.load(open(self.input_json, 'r', encoding='utf-8-sig')), b, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
                     # 写回
-                    with open(self.input_json, 'w', encoding='utf-8') as f:
+                    with open(str(self.output_json), 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
-                        self.logger.info(f"已将 {len(extracted_map)} 个提取成功的音频路径写回 {self.input_json}")
+                        self.logger.info(f"已将 {len(extracted_map)} 个提取成功的音频路径写回 {self.output_json}")
                 else:
                     self.logger.warning("输入 JSON 不是列表，跳过写回操作")
             except Exception as e:
@@ -631,3 +620,33 @@ class AudioExtractor:
         self._check_output_directory()
         
         return self.success_count > 0
+
+
+
+class OSSUploader:
+    def __init__(self, logger, input_json):
+        self.logger = logger
+        self.input_json = input_json
+
+# 其他实现
+
+
+
+class AudioTranscriber:
+    def __init__(self, logger, bucket_name, bucket_endpoint, access_key_id, access_key_secret, output_dir):
+        self.logger = logger
+        self.bucket_name = bucket_name
+        self.bucket_endpoint = bucket_endpoint
+        self.access_key_id = access_key_id
+        self.access_key_secret = access_key_secret
+        self.output_dir = output_dir
+
+# 其他实现
+
+
+
+class TextSummarizer:
+    def __init__(self, logger, model_api_key, output_dir):
+        self.logger = logger
+        self.model_api_key = model_api_key
+        self.output_dir = output_dir
