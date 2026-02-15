@@ -48,7 +48,7 @@ def _setup_logger(output_dir: Path) -> logging.Logger:
     return logger
 
 
-def summarize(input_dir: str, output_dir: str, processes: int = 1, audio_only: bool = False,
+def summarize(input_dir: str = None, output_dir: str = None, processes: int = 1, audio_only: bool = False,
               bucket_name: str = None, bucket_endpoint: str = None, 
               access_key_id: str = None, access_key_secret: str = None,
               funasr_api_key: str = None, deepseek_api_key: str = None):
@@ -75,7 +75,7 @@ def summarize(input_dir: str, output_dir: str, processes: int = 1, audio_only: b
     
     # 命令行参数解析
     if not (input_dir and output_dir):
-        parser = argparse.ArgumentParser(description='音频总结主程序')
+        parser = argparse.ArgumentParser(description='音频总结工具 - 从音视频文件中提取音频、转文字并总结')
         parser.add_argument('--input-dir', required=True,
                             help='需要处理的包含音视频文件的目录的路径')
         parser.add_argument('--output-dir', required=True,
@@ -116,7 +116,7 @@ def summarize(input_dir: str, output_dir: str, processes: int = 1, audio_only: b
                 bucket_endpoint = bucket_endpoint or config.get("bucket-endpoint")
                 access_key_id = access_key_id or config.get("bucket-access-key-id")
                 access_key_secret = access_key_secret or config.get("bucket-access-key-secret")
-                funasr_api_key = funasr_api_key or config.get("model-api-key")
+                funasr_api_key = funasr_api_key or config.get("funasr-api-key")
                 deepseek_api_key = deepseek_api_key or config.get("deepseek-api-key")
                 
             except Exception as e:
@@ -290,4 +290,4 @@ def summarize(input_dir: str, output_dir: str, processes: int = 1, audio_only: b
 
 
 if __name__ == "__main__":
-    summarize(None, None)  # 触发命令行参数解析
+    summarize()  # 触发命令行参数解析
