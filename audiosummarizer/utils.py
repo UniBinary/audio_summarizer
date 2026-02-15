@@ -4,11 +4,11 @@ import json
 import time
 import subprocess
 from pathlib import Path
-from typing import List, Set
+from typing import List, Set, Dict, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-class AudioFinder:
-    """音频文件查找器类"""
+class AVFinder:
+    """寻找音视频文件类"""
     
     # 支持的音视频文件扩展名
     SUPPORTED_EXTENSIONS = {
@@ -19,27 +19,36 @@ class AudioFinder:
         '.mpg', '.mpeg'
     }
     
-    def __init__(self, logger, input_dir: Path, output_json: Path):
+    def __init__(self, input_dir: Path, output_json: Path, logger=None):
         """
-        初始化音频查找器
+        初始化音视频文件查找器
         
         Args:
-            logger: 日志记录器对象
             input_dir: 输入目录路径，递归遍历此目录寻找音视频文件
-            output_json: 输出JSON文件路径
+            output_json: 输出的含有音视频文件路径列表的JSON文件路径
+            logger: 日志记录器对象，若为空则自行创建
         """
-        self.logger = logger
         self.input_dir = input_dir
         self.output_json = output_json
+        
+        # 设置logger
+        if logger is None:
+            import logging
+            self.logger = logging.getLogger(__name__)
+            self.logger.setLevel(logging.INFO)
+            if not self.logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+        else:
+            self.logger = logger
         
         # 存储类内数据
         self.audio_files: List[str] = []
         self.processed_dirs: Set[Path] = set()
         self.skipped_dirs: Set[Path] = set()
         self.total_files_found = 0
-        
-        # 配置logger
-        self._setup_logger()
         
         # 验证目录
         self._validate_directories()
@@ -55,9 +64,8 @@ class AudioFinder:
             self.logger.error(f"输入路径不是目录: {self.input_dir}")
             raise NotADirectoryError(f"输入路径不是目录: {self.input_dir}")
         
-        # 创建输出目录
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info(f"输出目录已创建/确认: {self.output_dir}")
+        # 创建输出目录（如果输出JSON文件路径的父目录不存在）
+        self.output_json.parent.mkdir(parents=True, exist_ok=True)
     
     def _is_audio_video_file(self, file_path: Path) -> bool:
         """
@@ -194,7 +202,7 @@ class AudioFinder:
         self.logger.info("开始查找音视频文件")
         self.logger.info("=" * 60)
         self.logger.info(f"输入目录: {self.input_dir}")
-        self.logger.info(f"输出目录: {self.output_dir}")
+        self.logger.info(f"输出JSON: {self.output_json}")
         self.logger.info(f"支持的文件扩展名: {', '.join(sorted(self.SUPPORTED_EXTENSIONS))}")
         
         # 重置统计数据
@@ -258,29 +266,46 @@ class AudioFinder:
 
 
 class AudioExtractor:
+    """提取音频类"""
+    
     AUDIO_EXTENSIONS = {
         # 音频格式
         '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus'
     }
 
-    def __init__(self, logger, ffmpeg_path : Path, output_dir : Path, input_json : Path, output_json : Path, num_processes : int = 1):
+    def __init__(self, input_json: Path, output_json: Path, audio_dir: Path, 
+                 ffmpeg_path: Path, ffprobe_path: Path, num_processes: int = 1, logger=None):
         """
         初始化音频提取器
         
         Args:
-            logger: 日志记录器对象
+            input_json: 输入的含有音视频文件路径列表的JSON文件路径
+            output_json: 输出的包含原有的音频文件和从视频中提取的音频文件的路径列表的JSON文件路径
+            audio_dir: 提取后的音频存放目录路径
             ffmpeg_path: ffmpeg可执行文件路径
-            output_dir: 输出目录路径
-            input_json: 输入JSON文件路径（包含视频列表）
-            output_json: 输出JSON文件路径
-            num_processes: 并行进程数，默认为CPU核心数，默认为1，表示不使用并行
+            ffprobe_path: ffprobe可执行文件路径
+            num_processes: 并行进程数，默认为1
+            logger: 日志记录器对象，若为空则自行创建
         """
-        self.ffmpeg_path = ffmpeg_path
-        self.output_dir = output_dir
-        self.logger = logger
         self.input_json = input_json
         self.output_json = output_json
+        self.audio_dir = audio_dir
+        self.ffmpeg_path = ffmpeg_path
+        self.ffprobe_path = ffprobe_path
         self.num_processes = num_processes
+        
+        # 设置logger
+        if logger is None:
+            import logging
+            self.logger = logging.getLogger(__name__)
+            self.logger.setLevel(logging.INFO)
+            if not self.logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+        else:
+            self.logger = logger
         
         # 初始化类内变量
         self.video_paths = []
@@ -294,10 +319,7 @@ class AudioExtractor:
         self.total_size = 0
         
         # 创建输出目录
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 配置logger
-        self._setup_logger()
+        self.audio_dir.mkdir(parents=True, exist_ok=True)
     
     def _setup_logger(self):
         # 如果用户传入 logger，此处可做额外配置；保留占位以避免 AttributeError
@@ -379,10 +401,12 @@ class AudioExtractor:
         """
         idx, video_path = task
         input_path = Path(video_path)
-        audio_path = self.output_dir / f"{idx+1:03d}.mp3"  # 001.mp3 对应 videos[0]
+        
+        # 获取文件扩展名
+        extension = input_path.suffix.lower()
         
         # 如果输入本身就是音频，则跳过处理（不复制）
-        if input_path.suffix.lower() in self.AUDIO_EXTENSIONS:
+        if extension in self.AUDIO_EXTENSIONS:
             if input_path.exists():
                 audio_duration = self._get_duration(input_path) or 0
                 size = input_path.stat().st_size
@@ -390,6 +414,10 @@ class AudioExtractor:
                 return idx, True, "输入为音频，跳过", str(input_path), size, audio_duration
             else:
                 return idx, False, "输入音频文件不存在", "", 0, 0
+        
+        # 生成音频文件名：索引+1，补齐三位数，保持原扩展名
+        audio_filename = f"{idx+1:03d}{extension}"
+        audio_path = self.audio_dir / audio_filename
         
         # 检查输出目录中编号对应的音频文件是否正确
         if audio_path.exists():
@@ -444,19 +472,26 @@ class AudioExtractor:
 
     def _check_output_directory(self):
         """检查输出目录内容"""
-        self.logger.info(f"\n输出目录内容:")
-        if self.output_dir.exists():
-            mp3_files = list(self.output_dir.glob("*.mp3"))
-            if mp3_files:
-                mp3_files.sort()
-                self.logger.info(f"MP3文件数: {len(mp3_files)}")
+        self.logger.info(f"\n音频目录内容:")
+        if self.audio_dir.exists():
+            # 获取所有音频文件
+            audio_files = []
+            for ext in self.AUDIO_EXTENSIONS:
+                audio_files.extend(list(self.audio_dir.glob(f"*{ext}")))
+            
+            if audio_files:
+                audio_files.sort()
+                self.logger.info(f"音频文件数: {len(audio_files)}")
                 
                 # 检查编号连续性
                 numbers = []
-                for f in mp3_files:
+                for f in audio_files:
                     try:
-                        num = int(f.stem)
-                        numbers.append(num)
+                        # 提取数字部分（文件名中的数字）
+                        num_str = ''.join(filter(str.isdigit, f.stem))
+                        if num_str:
+                            num = int(num_str)
+                            numbers.append(num)
                     except:
                         pass
                 
@@ -482,13 +517,13 @@ class AudioExtractor:
                     if missing:
                         self.logger.warning(f"缺失编号: {len(missing)} 个")
                         for num in missing[:10]:
-                            self.logger.warning(f"  {num:03d}.mp3")
+                            self.logger.warning(f"  {num:03d}")
                         if len(missing) > 10:
                             self.logger.warning(f"  ... 还有 {len(missing)-10} 个")
                     else:
                         self.logger.info("✓ 所有编号连续完整")
             else:
-                self.logger.info("输出目录为空")
+                self.logger.info("音频目录为空")
 
     def process_videos(self):
         """处理视频列表"""
@@ -509,7 +544,7 @@ class AudioExtractor:
         
         self.logger.info(f"开始处理 {len(self.video_paths)} 个文件")
         self.logger.info(f"使用 {self.num_processes} 个进程")
-        self.logger.info(f"输出目录: {self.output_dir}")
+        self.logger.info(f"音频目录: {self.audio_dir}")
         self.logger.info("-" * 60)
         
         start_time = time.time()
@@ -545,7 +580,7 @@ class AudioExtractor:
                     self.total_duration += duration
                 
                 if task_success:
-                    if "已存在" in message:
+                    if "输入为音频" in message:
                         self.skipped_count += 1
                         status = "↻"
                     else:
@@ -558,7 +593,7 @@ class AudioExtractor:
                     status = "✗"
                 
                 # 如果是提取成功，记录以便写回 JSON
-                if task_success and message == "提取成功" and audio_path_str:
+                if task_success and audio_path_str:
                     extracted_map[idx] = audio_path_str
                 
                 # 显示进度
@@ -580,24 +615,24 @@ class AudioExtractor:
                         time_info = f"[时间] 已用: {time.strftime('%H:%M:%S', time.gmtime(elapsed))} | 预计剩余: {time.strftime('%H:%M:%S', time.gmtime(eta))}"
                         self.logger.info(time_info)
         
-        # 将成功提取的音频路径写回输入 JSON（保持索引一致）
-        if extracted_map and self.input_json and self.input_json.exists():
+        # 将成功提取的音频路径写回输出 JSON（保持索引一致）
+        if extracted_map:
             try:
-                with open(str(self.input_json), 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
-                # 确保 data 是列表
-                if isinstance(data, list):
-                    for idx, audio_path in extracted_map.items():
-                        if 0 <= idx < len(data):
-                            data[idx] = audio_path
-                    # 写回
-                    with open(str(self.output_json), 'w', encoding='utf-8') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                        self.logger.info(f"已将 {len(extracted_map)} 个提取成功的音频路径写回 {self.output_json}")
-                else:
-                    self.logger.warning("输入 JSON 不是列表，跳过写回操作")
+                # 创建输出列表，用音频路径覆盖原视频路径
+                output_list = []
+                for idx in range(len(self.video_paths)):
+                    if idx in extracted_map:
+                        output_list.append(extracted_map[idx])
+                    else:
+                        # 如果该索引没有提取成功，保持原路径
+                        output_list.append(self.video_paths[idx])
+                
+                # 写回输出JSON
+                with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                    json.dump(output_list, f, ensure_ascii=False, indent=2)
+                    self.logger.info(f"已将 {len(extracted_map)} 个提取成功的音频路径写入 {self.output_json}")
             except Exception as e:
-                self.logger.error(f"写回输入 JSON 失败: {e}")
+                self.logger.error(f"写入输出 JSON 失败: {e}")
         
         # 最终统计
         total_time = time.time() - start_time
@@ -624,29 +659,760 @@ class AudioExtractor:
 
 
 class OSSUploader:
-    def __init__(self, logger, input_json):
-        self.logger = logger
+    """上传音频到OSS类"""
+    
+    def __init__(self, input_json: Path, output_json: Path, bucket_name: str, 
+                 bucket_endpoint: str, access_key_id: str, access_key_secret: str, 
+                 num_processes: int = 1, logger=None):
+        """
+        初始化OSS上传器
+        
+        Args:
+            input_json: 输入的包含原有的音频文件和从视频中提取的音频文件的路径列表的JSON文件路径
+            output_json: 输出的包含所有音频文件的公网URL的JSON文件路径
+            bucket_name: 阿里云OSS存储桶名
+            bucket_endpoint: 阿里云OSS存储桶endpoint
+            access_key_id: 阿里云access key ID
+            access_key_secret: 阿里云access key secret
+            num_processes: 并行进程数，默认为1
+            logger: 日志记录器对象，若为空则自行创建
+        """
         self.input_json = input_json
-
-# 其他实现
-
-
-
-class AudioTranscriber:
-    def __init__(self, logger, bucket_name, bucket_endpoint, access_key_id, access_key_secret, output_dir):
-        self.logger = logger
+        self.output_json = output_json
         self.bucket_name = bucket_name
         self.bucket_endpoint = bucket_endpoint
         self.access_key_id = access_key_id
         self.access_key_secret = access_key_secret
-        self.output_dir = output_dir
+        self.num_processes = num_processes
+        
+        # 设置logger
+        if logger is None:
+            import logging
+            self.logger = logging.getLogger(__name__)
+            self.logger.setLevel(logging.INFO)
+            if not self.logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+        else:
+            self.logger = logger
+        
+        # 初始化OSS客户端
+        try:
+            import oss2
+            auth = oss2.Auth(self.access_key_id, self.access_key_secret)
+            self.bucket = oss2.Bucket(auth, self.bucket_endpoint, self.bucket_name)
+            self.logger.info(f"OSS客户端初始化成功，存储桶: {self.bucket_name}")
+        except ImportError:
+            self.logger.error("请安装 oss2 库: pip install oss2")
+            raise
+        except Exception as e:
+            self.logger.error(f"OSS客户端初始化失败: {e}")
+            raise
+        
+        # 初始化统计信息
+        self.total_files = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.uploaded_urls = []
+    
+    def _load_file_list(self) -> List[str]:
+        """从JSON文件加载文件列表"""
+        self.logger.info(f"读取文件列表: {self.input_json}")
+        try:
+            with open(str(self.input_json), 'r', encoding='utf-8') as f:
+                file_list = json.load(f)
+            
+            if not isinstance(file_list, list):
+                self.logger.error(f"JSON文件不是列表格式: {self.input_json}")
+                return []
+            
+            self.total_files = len(file_list)
+            self.logger.info(f"找到 {self.total_files} 个文件需要上传")
+            return file_list
+            
+        except FileNotFoundError:
+            self.logger.error(f"输入JSON文件不存在: {self.input_json}")
+            return []
+        except Exception as e:
+            self.logger.error(f"读取JSON文件失败: {e}")
+            return []
+    
+    def _upload_single_file(self, task):
+        """上传单个文件到OSS
+        返回: (idx, success_bool, message, url)
+        """
+        idx, file_path = task
+        file_path_obj = Path(file_path)
+        
+        # 生成OSS对象名: oss://audios/<索引+1，补齐三位数>.<后缀名>
+        extension = file_path_obj.suffix.lower()
+        object_name = f"audios/{idx+1:03d}{extension}"
+        
+        try:
+            # 检查文件是否存在
+            if not file_path_obj.exists():
+                return idx, False, "本地文件不存在", ""
+            
+            # 上传文件到OSS
+            self.logger.debug(f"上传文件: {file_path} -> {object_name}")
+            self.bucket.put_object_from_file(object_name, str(file_path_obj))
+            
+            # 生成可访问的URL（有效期1天）
+            url = self.bucket.sign_url('GET', object_name, 86400)
+            
+            return idx, True, "上传成功", url
+            
+        except Exception as e:
+            self.logger.debug(f"上传失败 {file_path}: {e}")
+            return idx, False, f"上传失败: {str(e)}", ""
+    
+    def upload_files(self) -> bool:
+        """上传所有文件到OSS"""
+        # 加载文件列表
+        file_list = self._load_file_list()
+        if not file_list:
+            self.logger.error("没有找到需要上传的文件")
+            return False
+        
+        self.logger.info(f"开始上传 {len(file_list)} 个文件")
+        self.logger.info(f"使用 {self.num_processes} 个进程")
+        self.logger.info(f"存储桶: {self.bucket_name}")
+        self.logger.info("-" * 60)
+        
+        start_time = time.time()
+        processed = 0
+        total = len(file_list)
+        
+        # 创建任务列表
+        tasks = [(i, str(path)) for i, path in enumerate(file_list)]
+        
+        # 初始化URL列表
+        self.uploaded_urls = [""] * total
+        
+        # 使用进程池
+        with ProcessPoolExecutor(max_workers=self.num_processes) as executor:
+            # 提交所有任务
+            future_to_task = {executor.submit(self._upload_single_file, task): task for task in tasks}
+            
+            # 处理结果
+            for future in as_completed(future_to_task):
+                try:
+                    idx, task_success, message, url = future.result()
+                except Exception as e:
+                    # 捕获子进程异常
+                    self.logger.error(f"任务异常: {e}")
+                    processed += 1
+                    self.failed_count += 1
+                    continue
 
-# 其他实现
+                processed += 1
+                
+                if task_success:
+                    self.success_count += 1
+                    self.uploaded_urls[idx] = url
+                    status = "✓"
+                else:
+                    self.failed_count += 1
+                    status = "✗"
+                
+                # 显示进度
+                elapsed = time.time() - start_time
+                progress = processed / total * 100
+                
+                log_msg = f"[{time.strftime('%H:%M:%S', time.gmtime(elapsed))}] {status} {idx+1:03d}: {message}"
+                self.logger.info(log_msg)
+                
+                # 每处理10个文件显示一次汇总
+                if processed % 10 == 0:
+                    summary = f"[进度] {processed}/{total} ({progress:.1f}%) | 成功: {self.success_count} | 失败: {self.failed_count}"
+                    self.logger.info(summary)
+                    
+                    if processed > 0:
+                        time_per_file = elapsed / processed
+                        remaining = total - processed
+                        eta = time_per_file * remaining
+                        time_info = f"[时间] 已用: {time.strftime('%H:%M:%S', time.gmtime(elapsed))} | 预计剩余: {time.strftime('%H:%M:%S', time.gmtime(eta))}"
+                        self.logger.info(time_info)
+        
+        # 保存URL列表到输出JSON
+        try:
+            with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                json.dump(self.uploaded_urls, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"URL列表已保存到: {self.output_json}")
+        except Exception as e:
+            self.logger.error(f"保存URL列表失败: {e}")
+            return False
+        
+        # 最终统计
+        total_time = time.time() - start_time
+        
+        self.logger.info("=" * 60)
+        self.logger.info("上传完成!")
+        self.logger.info("=" * 60)
+        self.logger.info(f"总文件数: {self.total_files}")
+        self.logger.info(f"上传成功: {self.success_count}")
+        self.logger.info(f"上传失败: {self.failed_count}")
+        self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
+        
+        if processed > 0:
+            self.logger.info(f"平均速度: {processed/(total_time/60):.1f} 文件/分钟")
+        
+        return self.success_count > 0
+
+
+
+class AudioTranscriber:
+    """音频转文字类"""
+    
+    def __init__(self, input_json: Path, output_json: Path, text_dir: Path, 
+                 model_api_key: str, num_processes: int = 1, logger=None):
+        """
+        初始化音频转录器
+        
+        Args:
+            input_json: 输入的包含所有音频文件的公网URL的JSON文件路径
+            output_json: 输出的包含所有音频转写生成的文字文件的路径的JSON文件路径
+            text_dir: 存放音频转写生成的文字文件的文件夹
+            model_api_key: Fun-ASR模型API key
+            num_processes: 并行进程数，默认为1
+            logger: 日志记录器对象，若为空则自行创建
+        """
+        self.input_json = input_json
+        self.output_json = output_json
+        self.text_dir = text_dir
+        self.model_api_key = model_api_key
+        self.num_processes = num_processes
+        
+        # 设置logger
+        if logger is None:
+            import logging
+            self.logger = logging.getLogger(__name__)
+            self.logger.setLevel(logging.INFO)
+            if not self.logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+        else:
+            self.logger = logger
+        
+        # 初始化统计信息
+        self.total_urls = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.text_file_paths = []
+        
+        # 创建文本目录
+        self.text_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _load_url_list(self) -> List[str]:
+        """从JSON文件加载URL列表"""
+        self.logger.info(f"读取URL列表: {self.input_json}")
+        try:
+            with open(str(self.input_json), 'r', encoding='utf-8') as f:
+                url_list = json.load(f)
+            
+            if not isinstance(url_list, list):
+                self.logger.error(f"JSON文件不是列表格式: {self.input_json}")
+                return []
+            
+            self.total_urls = len(url_list)
+            self.logger.info(f"找到 {self.total_urls} 个URL需要转录")
+            return url_list
+            
+        except FileNotFoundError:
+            self.logger.error(f"输入JSON文件不存在: {self.input_json}")
+            return []
+        except Exception as e:
+            self.logger.error(f"读取JSON文件失败: {e}")
+            return []
+    
+    def _split_urls_into_batches(self, urls: List[str]) -> List[List[str]]:
+        """将URL列表分成多个批次
+        每个批次最多100个URL，最少分num_processes个批次
+        """
+        # 如果URL个数小于num_processes，则调整num_processes
+        actual_processes = min(self.num_processes, len(urls))
+        
+        # 计算每个批次的大小
+        max_batch_size = 100
+        min_batches = actual_processes
+        
+        # 计算批次数量
+        num_batches = max(min_batches, (len(urls) + max_batch_size - 1) // max_batch_size)
+        
+        # 计算每个批次的大小
+        batch_size = (len(urls) + num_batches - 1) // num_batches
+        
+        # 分割URL列表
+        batches = []
+        for i in range(0, len(urls), batch_size):
+            batch = urls[i:i+batch_size]
+            batches.append(batch)
+        
+        self.logger.info(f"将 {len(urls)} 个URL分成 {len(batches)} 个批次，每个批次最多 {batch_size} 个URL")
+        return batches
+    
+    def _transcribe_batch(self, batch_urls: List[str], batch_index: int) -> List[str]:
+        """转录一个批次的音频URL"""
+        try:
+            import dashscope
+            from dashscope.audio.asr import Transcription
+            from http import HTTPStatus
+            from urllib import request
+            
+            # 设置API配置
+            dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
+            dashscope.api_key = self.model_api_key
+            
+            # 调用Fun-ASR API
+            task_response = Transcription.async_call(
+                model='fun-asr',
+                file_urls=batch_urls,
+                language_hints=['zh',],
+                diarization_enabled=True,
+            )
+            
+            transcription_response = Transcription.wait(task=task_response.output.task_id)
+            
+            results = []
+            if transcription_response.status_code == HTTPStatus.OK:
+                for transcription in transcription_response.output['results']:
+                    if transcription['subtask_status'] == 'SUCCEEDED':
+                        url = transcription['transcription_url']
+                        result_data = json.loads(request.urlopen(url).read().decode('utf8'))
+                        
+                        # 格式化转录结果
+                        result_str = self._format_transcription_result(result_data)
+                        results.append(result_str)
+                    else:
+                        self.logger.error(f'转录失败: {transcription}')
+                        results.append("")  # 失败时返回空字符串
+            else:
+                self.logger.error(f'Fun-ASR API错误: {transcription_response.output.message}')
+                # 返回与音频URL数量相同的空字符串列表
+                results = [""] * len(batch_urls)
+            
+            return results
+            
+        except ImportError:
+            self.logger.error("请安装 dashscope 库: pip install dashscope")
+            raise
+        except Exception as e:
+            self.logger.error(f"转录批次 {batch_index} 失败: {e}")
+            # 返回空字符串列表
+            return [""] * len(batch_urls)
+    
+    def _format_transcription_result(self, result_data: Dict) -> str:
+        """格式化转录结果为指定的字符串格式"""
+        try:
+            transcripts = result_data.get("transcripts", [])
+            if not transcripts:
+                return ""
+            
+            formatted_lines = []
+            
+            for transcript in transcripts:
+                sentences = transcript.get("sentences", [])
+                if not sentences:
+                    continue
+                
+                # 按时间顺序排序句子
+                sorted_sentences = sorted(sentences, key=lambda x: x.get("begin_time", 0))
+                
+                for sentence in sorted_sentences:
+                    speaker_id = sentence.get("speaker_id", 0)
+                    text = sentence.get("text", "").strip()
+                    
+                    if text:  # 只添加非空文本
+                        # speaker_id从0开始，+1使其从1开始
+                        formatted_line = f"{speaker_id + 1}: {text}"
+                        formatted_lines.append(formatted_line)
+            
+            # 将所有行用换行符连接
+            result_str = "\n".join(formatted_lines)
+            return result_str
+            
+        except Exception as e:
+            self.logger.error(f"格式化转录结果失败: {e}")
+            return ""
+    
+    def transcribe_audio(self) -> bool:
+        """转录所有音频"""
+        # 加载URL列表
+        url_list = self._load_url_list()
+        if not url_list:
+            self.logger.error("没有找到需要转录的URL")
+            return False
+        
+        # 将URL分成批次
+        url_batches = self._split_urls_into_batches(url_list)
+        
+        self.logger.info(f"开始转录 {len(url_list)} 个音频")
+        self.logger.info(f"使用 {len(url_batches)} 个进程")
+        self.logger.info(f"文本目录: {self.text_dir}")
+        self.logger.info("-" * 60)
+        
+        start_time = time.time()
+        
+        # 创建回传字典
+        result_dict = {}
+        
+        # 使用进程池处理批次
+        with ProcessPoolExecutor(max_workers=len(url_batches)) as executor:
+            # 提交所有批次任务
+            future_to_batch = {}
+            for i, batch in enumerate(url_batches):
+                future = executor.submit(self._transcribe_batch, batch, i)
+                future_to_batch[future] = i
+            
+            # 处理结果
+            processed_batches = 0
+            total_batches = len(url_batches)
+            
+            for future in as_completed(future_to_batch):
+                batch_index = future_to_batch[future]
+                try:
+                    batch_results = future.result()
+                    result_dict[batch_index] = batch_results
+                    
+                    processed_batches += 1
+                    progress = processed_batches / total_batches * 100
+                    
+                    elapsed = time.time() - start_time
+                    log_msg = f"[{time.strftime('%H:%M:%S', time.gmtime(elapsed))}] ✓ 批次 {batch_index+1}/{total_batches} 完成，处理了 {len(batch_results)} 个音频"
+                    self.logger.info(log_msg)
+                    
+                except Exception as e:
+                    self.logger.error(f"批次 {batch_index} 执行失败: {e}")
+                    # 为失败的批次添加空结果
+                    result_dict[batch_index] = [""] * len(url_batches[batch_index])
+        
+        # 将回传字典转为列表并展开
+        all_results = []
+        for batch_index in sorted(result_dict.keys()):
+            all_results.extend(result_dict[batch_index])
+        
+        # 保存转录结果到文件
+        self.text_file_paths = []
+        for idx, result_text in enumerate(all_results):
+            text_filename = f"{idx+1:03d}.txt"
+            text_path = self.text_dir / text_filename
+            
+            try:
+                with open(str(text_path), 'w', encoding='utf-8') as f:
+                    f.write(result_text)
+                
+                self.text_file_paths.append(str(text_path))
+                
+                if result_text.strip():
+                    self.success_count += 1
+                else:
+                    self.failed_count += 1
+                    
+            except Exception as e:
+                self.logger.error(f"保存文本文件失败 {text_filename}: {e}")
+                self.text_file_paths.append("")
+                self.failed_count += 1
+        
+        # 保存文本文件路径列表到输出JSON
+        try:
+            with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                json.dump(self.text_file_paths, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"文本文件路径列表已保存到: {self.output_json}")
+        except Exception as e:
+            self.logger.error(f"保存文本文件路径列表失败: {e}")
+            return False
+        
+        # 最终统计
+        total_time = time.time() - start_time
+        
+        self.logger.info("=" * 60)
+        self.logger.info("转录完成!")
+        self.logger.info("=" * 60)
+        self.logger.info(f"总音频数: {self.total_urls}")
+        self.logger.info(f"转录成功: {self.success_count}")
+        self.logger.info(f"转录失败: {self.failed_count}")
+        self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
+        
+        if self.total_urls > 0:
+            self.logger.info(f"平均速度: {self.total_urls/(total_time/60):.1f} 音频/分钟")
+        
+        return self.success_count > 0
 
 
 
 class TextSummarizer:
-    def __init__(self, logger, model_api_key, output_dir):
-        self.logger = logger
+    """总结文字类"""
+    
+    def __init__(self, input_json: Path, output_json: Path, summary_dir: Path, 
+                 model_api_key: str, num_processes: int = 1, origin_json: Path = None, logger=None):
+        """
+        初始化文本总结器
+        
+        Args:
+            input_json: 输入的包含所有音频转写生成的文字文件的路径的JSON文件路径
+            output_json: 输出的包含所有Deepseek生成的文字总结文件的路径的JSON文件路径
+            summary_dir: 存放Deepseek生成的文字总结的文件夹
+            model_api_key: Deepseek模型API key
+            num_processes: 并行进程数，默认为1
+            origin_json: 包含每个文本文件对应的原视频路径的列表的JSON文件路径，若为空则不在生成的总结头部添加原视频路径
+            logger: 日志记录器对象，若为空则自行创建
+        """
+        self.input_json = input_json
+        self.output_json = output_json
+        self.summary_dir = summary_dir
         self.model_api_key = model_api_key
-        self.output_dir = output_dir
+        self.num_processes = num_processes
+        self.origin_json = origin_json
+        
+        # 设置logger
+        if logger is None:
+            import logging
+            self.logger = logging.getLogger(__name__)
+            self.logger.setLevel(logging.INFO)
+            if not self.logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self.logger.addHandler(handler)
+        else:
+            self.logger = logger
+        
+        # 初始化统计信息
+        self.total_texts = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.summary_file_paths = []
+        
+        # 创建总结目录
+        self.summary_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 系统提示词
+        self.system_prompt = """请总结以下逐字稿的主要内容，每一行是一句话，冒号前是说话人ID，冒号后是说话内容。
+要求：使用Markdown格式输出总结，把说话人的意思表达清楚，重要的语段详细一些，6000字以内即可。如果能推断出说话人身份，可以省略说话人ID，直接用身份称呼，并在结尾注明身份对应的说话人ID。
+注意：
+1.以下文字是AI从音频中识别的，可能会有一些不必要的语气词，请适当忽略。说话人普通话不标准、说话不流利等因素都可能导致识别不准，遇到错误时请适当根据上下文推测。
+2.回答开头不要有类似"好的"的语句，直接开始总结。"""
+    
+    def _load_text_file_paths(self) -> List[str]:
+        """从JSON文件加载文本文件路径列表"""
+        self.logger.info(f"读取文本文件路径列表: {self.input_json}")
+        try:
+            with open(str(self.input_json), 'r', encoding='utf-8') as f:
+                text_paths = json.load(f)
+            
+            if not isinstance(text_paths, list):
+                self.logger.error(f"JSON文件不是列表格式: {self.input_json}")
+                return []
+            
+            self.total_texts = len(text_paths)
+            self.logger.info(f"找到 {self.total_texts} 个文本文件需要总结")
+            return text_paths
+            
+        except FileNotFoundError:
+            self.logger.error(f"输入JSON文件不存在: {self.input_json}")
+            return []
+        except Exception as e:
+            self.logger.error(f"读取JSON文件失败: {e}")
+            return []
+    
+    def _load_origin_paths(self) -> List[str]:
+        """加载原始视频路径列表"""
+        if self.origin_json is None:
+            return []
+        
+        try:
+            with open(str(self.origin_json), 'r', encoding='utf-8') as f:
+                origin_paths = json.load(f)
+            
+            if not isinstance(origin_paths, list):
+                self.logger.warning(f"原始路径JSON文件不是列表格式: {self.origin_json}")
+                return []
+            
+            return origin_paths
+            
+        except FileNotFoundError:
+            self.logger.warning(f"原始路径JSON文件不存在: {self.origin_json}")
+            return []
+        except Exception as e:
+            self.logger.warning(f"读取原始路径JSON文件失败: {e}")
+            return []
+    
+    def _read_text_file(self, text_path: str) -> str:
+        """读取文本文件内容"""
+        try:
+            with open(text_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return content
+        except Exception as e:
+            self.logger.error(f"读取文本文件失败 {text_path}: {e}")
+            return ""
+    
+    def _create_prompt(self, text_content: str) -> str:
+        """创建Deepseek的prompt"""
+        return f"{self.system_prompt}\n\n{text_content}"
+    
+    def _summarize_single_text(self, task):
+        """总结单个文本文件
+        返回: (idx, success_bool, message, summary_text)
+        """
+        idx, text_path, origin_path = task
+        
+        try:
+            # 读取文本内容
+            text_content = self._read_text_file(text_path)
+            if not text_content.strip():
+                return idx, False, "文本内容为空", ""
+            
+            # 创建prompt
+            prompt = self._create_prompt(text_content)
+            
+            # 调用Deepseek API
+            from openai import OpenAI
+            
+            client = OpenAI(
+                api_key=self.model_api_key,
+                base_url="https://api.deepseek.com"
+            )
+            
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": text_content}
+                ],
+                stream=False,
+                temperature=0.3
+            )
+            
+            summary = response.choices[0].message.content
+            
+            # 如果提供了原始路径，在总结开头添加原视频链接
+            if origin_path:
+                summary = f"[原视频]({origin_path})\n\n{summary}"
+            
+            return idx, True, "总结成功", summary
+            
+        except ImportError:
+            return idx, False, "请安装 openai 库: pip install openai", ""
+        except Exception as e:
+            return idx, False, f"API调用失败: {str(e)}", ""
+    
+    def summarize_texts(self) -> bool:
+        """总结所有文本"""
+        # 加载文本文件路径列表
+        text_paths = self._load_text_file_paths()
+        if not text_paths:
+            self.logger.error("没有找到需要总结的文本文件")
+            return False
+        
+        # 加载原始路径列表
+        origin_paths = self._load_origin_paths()
+        
+        self.logger.info(f"开始总结 {len(text_paths)} 个文本")
+        self.logger.info(f"使用 {self.num_processes} 个进程")
+        self.logger.info(f"总结目录: {self.summary_dir}")
+        self.logger.info("-" * 60)
+        
+        start_time = time.time()
+        processed = 0
+        total = len(text_paths)
+        
+        # 创建任务列表
+        tasks = []
+        for idx, text_path in enumerate(text_paths):
+            origin_path = origin_paths[idx] if idx < len(origin_paths) else ""
+            tasks.append((idx, text_path, origin_path))
+        
+        # 初始化总结列表
+        summaries = [""] * total
+        self.summary_file_paths = [""] * total
+        
+        # 使用进程池
+        with ProcessPoolExecutor(max_workers=self.num_processes) as executor:
+            # 提交所有任务
+            future_to_task = {executor.submit(self._summarize_single_text, task): task for task in tasks}
+            
+            # 处理结果
+            for future in as_completed(future_to_task):
+                try:
+                    idx, task_success, message, summary_text = future.result()
+                except Exception as e:
+                    # 捕获子进程异常
+                    self.logger.error(f"任务异常: {e}")
+                    processed += 1
+                    self.failed_count += 1
+                    continue
+
+                processed += 1
+                
+                if task_success:
+                    self.success_count += 1
+                    summaries[idx] = summary_text
+                    status = "✓"
+                else:
+                    self.failed_count += 1
+                    status = "✗"
+                
+                # 显示进度
+                elapsed = time.time() - start_time
+                progress = processed / total * 100
+                
+                log_msg = f"[{time.strftime('%H:%M:%S', time.gmtime(elapsed))}] {status} {idx+1:03d}: {message}"
+                self.logger.info(log_msg)
+                
+                # 每处理10个文件显示一次汇总
+                if processed % 10 == 0:
+                    summary = f"[进度] {processed}/{total} ({progress:.1f}%) | 成功: {self.success_count} | 失败: {self.failed_count}"
+                    self.logger.info(summary)
+                    
+                    if processed > 0:
+                        time_per_file = elapsed / processed
+                        remaining = total - processed
+                        eta = time_per_file * remaining
+                        time_info = f"[时间] 已用: {time.strftime('%H:%M:%S', time.gmtime(elapsed))} | 预计剩余: {time.strftime('%H:%M:%S', time.gmtime(eta))}"
+                        self.logger.info(time_info)
+        
+        # 保存总结到文件
+        for idx, summary_text in enumerate(summaries):
+            if summary_text.strip():  # 只保存非空总结
+                summary_filename = f"{idx+1:03d}.md"
+                summary_path = self.summary_dir / summary_filename
+                
+                try:
+                    with open(str(summary_path), 'w', encoding='utf-8') as f:
+                        f.write(summary_text)
+                    
+                    self.summary_file_paths[idx] = str(summary_path)
+                    
+                except Exception as e:
+                    self.logger.error(f"保存总结文件失败 {summary_filename}: {e}")
+                    self.summary_file_paths[idx] = ""
+        
+        # 保存总结文件路径列表到输出JSON
+        try:
+            with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                json.dump(self.summary_file_paths, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"总结文件路径列表已保存到: {self.output_json}")
+        except Exception as e:
+            self.logger.error(f"保存总结文件路径列表失败: {e}")
+            return False
+        
+        # 最终统计
+        total_time = time.time() - start_time
+        
+        self.logger.info("=" * 60)
+        self.logger.info("总结完成!")
+        self.logger.info("=" * 60)
+        self.logger.info(f"总文本数: {self.total_texts}")
+        self.logger.info(f"总结成功: {self.success_count}")
+        self.logger.info(f"总结失败: {self.failed_count}")
+        self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
+        
+        if processed > 0:
+            self.logger.info(f"平均速度: {processed/(total_time/60):.1f} 文本/分钟")
+        
+        return self.success_count > 0
