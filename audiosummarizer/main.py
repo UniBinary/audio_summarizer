@@ -1,8 +1,10 @@
+import json
 import argparse
 import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Union
 
 # 导入工具类
 try:
@@ -23,124 +25,116 @@ except ImportError:
         TextSummarizer
     )
 
-def _setup_logger(output_dir: Path) -> logging.Logger:
-    """配置logger"""
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    
-    # 避免重复添加handler
-    if not logger.handlers:
-        # 控制台handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
-        
-        # 文件handler
-        log_file = output_dir / "audio_summarizer.log"
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
-
-    return logger
-
-
-def summarize(input_dir: str = None, output_dir: str = None, processes: int = 1, audio_only: bool = False,
-              bucket_name: str = None, bucket_endpoint: str = None, 
-              access_key_id: str = None, access_key_secret: str = None,
-              funasr_api_key: str = None, deepseek_api_key: str = None):
+def summarize_cli():
     """
-    audio_summarizer的主函数，提供两种调用方式：
-    1. Python传入参数调用
-    2. 命令行命令 audiosummarizer 或 sumaudio 传入参数调用（两个命令效果一样，只是别名）
+    该函数负责解析命令行参数并调用 summarize() 函数执行总结流程
+    请勿在Python中调用此函数，该函数可通过命令行命令 audiosummarizer 或 sumaudio 传入参数调用（两个命令效果一样，只是别名）
+    若想在Python中调用，请直接调用 summarize() 函数并传入相应参数
+    """
+    parser = argparse.ArgumentParser(description='音频总结工具 - 从音视频文件中提取音频、转文字并总结')
+    parser.add_argument('--config-file',required=True, help=
+"""配置字典，包含以下参数：
+- bucket_name: 阿里云OSS存储桶名
+- bucket_endpoint: 阿里云OSS存储桶endpoint
+- access_key_id: 阿里云access key ID
+- access_key_secret: 阿里云access key secret
+- funasr_api_key: Fun-ASR模型API key
+- deepseek_api_key: Deepseek模型API key
+- ffmpeg_path: ffmpeg可执行文件路径（若想使用PATH中的ffmpeg，填写"ffmpeg"即可）
+- ffprobe_path: ffprobe可执行文件路径（若想使用PATH中的ffprobe，填写"ffprobe"即可）""")
+    parser.add_argument('--input-dir', required=True,
+                        help='需要处理的包含音视频文件的目录的路径')
+    parser.add_argument('--output-dir', required=True,
+                        help='总结输出文件夹路径')
+    parser.add_argument('--processes', type=int, default=1,
+                        help='同时处理的进程数，默认为1')
+    parser.add_argument('--audio-only', action='store_true',
+                        help='如果设置，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。')
     
+    args = parser.parse_args()
+    
+    logger = _setup_logger(args.output_dir)
+
+    # 从配置文件读取参数
+    try:
+        with open(args.config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        logger.error(f"配置文件 {args.config_file} 未找到")
+        exit(1)
+    except Exception as e:
+        logger.error(f"读取配置文件失败: {e}")
+        exit(1)
+    
+    summarize(
+        config=config,
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        processes=args.processes,
+        audio_only=args.audio_only,
+        logger=logger
+    )
+
+
+
+def summarize(config: dict[str, str],
+              input_dir: Union[str, Path],
+              output_dir: Union[str, Path],
+              processes: int = 1,
+              audio_only: bool = False,
+              logger: logging.Logger = None):
+    """
+    audio_summarizer的主函数
+    
+    :param config: 配置字典，包含以下参数（键、值全部为str）：
+        - bucket_name: 阿里云OSS存储桶名
+        - bucket_endpoint: 阿里云OSS存储桶endpoint
+        - access_key_id: 阿里云access key ID
+        - access_key_secret: 阿里云access key secret
+        - funasr_api_key: Fun-ASR模型API key
+        - deepseek_api_key: Deepseek模型API key
+        - ffmpeg_path: ffmpeg可执行文件路径（若想使用PATH中的ffmpeg，填写"ffmpeg"即可）
+        - ffprobe_path: ffprobe可执行文件路径（若想使用PATH中的ffprobe，填写"ffprobe"即可）
+    :type config: dict
     :param input_dir: 需要处理的包含音视频文件的目录的路径
     :type input_dir: str
     :param output_dir: 总结输出文件夹路径
     :type output_dir: str
     :param processes: 同时处理的进程数，默认为1
     :type processes: int
-    :param audio_only: 如果设置，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。
-    :type audio_only: bool
-    :param bucket_name: 阿里云OSS存储桶名
-    :param bucket_endpoint: 阿里云OSS存储桶endpoint
-    :param access_key_id: 阿里云access key ID
-    :param access_key_secret: 阿里云access key secret
-    :param funasr_api_key: Fun-ASR模型API key
-    :param deepseek_api_key: Deepseek模型API key
+    :param audio_only: 默认为False，如果设置为True，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。
+    :type audio_only: bool or None
+    :param logger: 可选的logger实例，如果未给出，将在函数内部创建一个新的logger
+    :type logger: logging.Logger or None
     """
-    
-    # 命令行参数解析
-    if not (input_dir and output_dir):
-        parser = argparse.ArgumentParser(description='音频总结工具 - 从音视频文件中提取音频、转文字并总结')
-        parser.add_argument('--input-dir', required=True,
-                            help='需要处理的包含音视频文件的目录的路径')
-        parser.add_argument('--output-dir', required=True,
-                            help='总结输出文件夹路径')
-        parser.add_argument('--processes', type=int, default=1,
-                            help='同时处理的进程数，默认为1')
-        parser.add_argument('--audio-only', action='store_true',
-                            help='如果设置，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。')
-        parser.add_argument('--bucket-name', help='阿里云OSS存储桶名')
-        parser.add_argument('--bucket-endpoint', help='阿里云OSS存储桶endpoint')
-        parser.add_argument('--access-key-id', help='阿里云access key ID')
-        parser.add_argument('--access-key-secret', help='阿里云access key secret')
-        parser.add_argument('--funasr-api-key', help='Fun-ASR模型API key')
-        parser.add_argument('--deepseek-api-key', help='Deepseek模型API key')
-        parser.add_argument('--config-file', help='配置文件路径（JSON格式）')
-        
-        args = parser.parse_args()
-        
-        input_dir = args.input_dir
-        output_dir = args.output_dir
-        processes = args.processes
-        audio_only = args.audio_only
-        bucket_name = args.bucket_name
-        bucket_endpoint = args.bucket_endpoint
-        access_key_id = args.access_key_id
-        access_key_secret = args.access_key_secret
-        funasr_api_key = args.funasr_api_key
-        deepseek_api_key = args.deepseek_api_key
-        
-        # 如果提供了配置文件，从配置文件读取参数
-        if args.config_file:
-            import json
-            try:
-                with open(args.config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                bucket_name = bucket_name or config.get("bucket-name")
-                bucket_endpoint = bucket_endpoint or config.get("bucket-endpoint")
-                access_key_id = access_key_id or config.get("bucket-access-key-id")
-                access_key_secret = access_key_secret or config.get("bucket-access-key-secret")
-                funasr_api_key = funasr_api_key or config.get("funasr-api-key")
-                deepseek_api_key = deepseek_api_key or config.get("deepseek-api-key")
-                
-            except Exception as e:
-                print(f"读取配置文件失败: {e}")
-                exit(1)
 
     # 转换为Path对象
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     
-    # 获取模块目录和资源路径
-    module_dir = Path(__file__).parent
-    assets_path = module_dir / "assets"
-    
     # 创建中间目录（使用时间戳避免冲突）
     interm_dir = output_dir / "intermediates" / datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # 设置ffmpeg路径
-    ffmpeg_path = assets_path / "ffmpeg.exe"
-    ffprobe_path = assets_path / "ffprobe.exe"
-    
     # 设置logger
-    logger = _setup_logger(output_dir)
+    if logger is None:
+        logger = _setup_logger(output_dir)
     
+    try:
+        bucket_name = config["bucket_name"]
+        bucket_endpoint = config["bucket_endpoint"]
+        access_key_id = config["bucket_access_key_id"]
+        access_key_secret = config["bucket_access_key_secret"]
+        funasr_api_key = config["funasr_api_key"]
+        deepseek_api_key = config["deepseek_api_key"]
+        ffmpeg_path = Path(config["ffmpeg_path"])
+        ffprobe_path = Path(config["ffprobe_path"])
+    except KeyError as e:
+        logger.error(f"配置文件缺少必要的参数: {e}")
+        exit(1)
+    except Exception as e:
+        logger.error(f"读取配置文件失败: {e}")
+        exit(1)
+
     # 创建目录
     interm_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -288,6 +282,29 @@ def summarize(input_dir: str = None, output_dir: str = None, processes: int = 1,
         for summary_file in sorted(summary_files):
             logger.info(f"  {summary_file.name}")
 
+def _setup_logger(output_dir: Path) -> logging.Logger:
+    """配置logger"""
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    
+    # 避免重复添加handler
+    if not logger.handlers:
+        # 控制台handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
+        
+        # 文件handler
+        log_file = output_dir / "audio_summarizer.log"
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+
+    return logger
 
 if __name__ == "__main__":
     summarize()  # 触发命令行参数解析

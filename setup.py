@@ -9,7 +9,7 @@ if readme.exists():
 
 setup(
     name="audio_summarizer",                 # 包名，发布到 PyPI 时使用
-    version="1.0a1",                         # 初始版本号，发布前更新
+    version="1.1",                         # 初始版本号，发布前更新
     description="一个用于总结音频文件和视频音轨的内容的工具。",  # 简短描述
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -33,14 +33,14 @@ setup(
     entry_points={
         "console_scripts": [
             # 将脚本暴露为命令行工具，修改为你项目的入口函数
-            "audiosummarizer=audiosummarizer.main:summarize",
-            "sumaudio=audiosummarizer.main:summarize"
+            "audiosummarizer=audiosummarizer.main:summarize_cli",
+            "sumaudio=audiosummarizer.main:summarize_cli"
         ]
     },
 
     license="MIT",
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
         "Intended Audience :: End Users/Desktop",
         "Natural Language :: Chinese (Simplified)",
@@ -56,7 +56,7 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
-        "Operating System :: Microsoft :: Windows"
+        "Operating System :: OS Independent"
     ],
 
     # metadata for upload
