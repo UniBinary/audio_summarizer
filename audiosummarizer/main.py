@@ -53,11 +53,11 @@ def summarize_cli():
     
     args = parser.parse_args()
     
-    logger = _setup_logger(args.output_dir)
+    logger = _setup_logger(Path(args.output_dir) / "audio_summarizer.log")
 
     # 从配置文件读取参数
     try:
-        with open(args.config_file, 'r', encoding='utf-8') as f:
+        with open(str(args.config_file), 'r', encoding='utf-8') as f:
             config = json.load(f)
     except FileNotFoundError:
         logger.error(f"配置文件 {args.config_file} 未找到")
@@ -71,11 +71,79 @@ def summarize_cli():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         processes=args.processes,
-        audio_only=args.audio_only,
-        logger=logger
+        audio_only=args.audio_only
     )
 
 
+
+def _read_checkpoint(output_dir: Path) -> int:
+    """
+    读取checkpoint文件
+    
+    Args:
+        output_dir: 输出目录
+        
+    Returns:
+        int: checkpoint值，如果文件不存在则返回0
+    """
+    checkpoint_file = output_dir / "checkpoint.txt"
+    if checkpoint_file.exists():
+        try:
+            with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                return int(content)
+        except (ValueError, IOError) as e:
+            logging.getLogger(__name__).warning(f"读取checkpoint文件失败，将从头开始: {e}")
+            return 0
+    return 0
+
+def _write_checkpoint(output_dir: Path, step: int):
+    """
+    写入checkpoint文件
+    
+    Args:
+        output_dir: 输出目录
+        step: 步骤编号
+    """
+    checkpoint_file = output_dir / "checkpoint.txt"
+    try:
+        with open(checkpoint_file, 'w', encoding='utf-8') as f:
+            f.write(str(step))
+    except IOError as e:
+        logging.getLogger(__name__).error(f"写入checkpoint文件失败: {e}")
+
+def _update_checkpoint(output_dir: Path, logger: logging.Logger):
+    """
+    更新checkpoint，将当前值加1
+    
+    Args:
+        output_dir: 输出目录
+        logger: 日志记录器
+    """
+    current_step = _read_checkpoint(output_dir)
+    new_step = current_step + 1
+    _write_checkpoint(output_dir, new_step)
+    logger.info(f"Checkpoint更新: {current_step} -> {new_step}")
+
+
+def _ensure_dir(path: Path, logger: logging.Logger):
+    """
+    确保给定路径存在且为目录
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.error(f"创建目录 {path} 失败: {e}")
+        exit(1)
+
+# 步骤定义
+STEP_INIT = 0          # 初始状态
+STEP_FIND_FILES = 1    # 步骤1: 寻找音视频文件
+STEP_EXTRACT_AUDIO = 2 # 步骤2: 提取音频
+STEP_UPLOAD_OSS = 3    # 步骤3: 上传到OSS
+STEP_TRANSCRIBE = 4    # 步骤4: 音频转文字
+STEP_SUMMARIZE = 5     # 步骤5: 总结文字
+STEP_COMPLETE = 6      # 完成
 
 def summarize(config: dict[str, str],
               input_dir: Union[str, Path],
@@ -97,9 +165,9 @@ def summarize(config: dict[str, str],
         - ffprobe_path: ffprobe可执行文件路径（若想使用PATH中的ffprobe，填写"ffprobe"即可）
     :type config: dict
     :param input_dir: 需要处理的包含音视频文件的目录的路径
-    :type input_dir: str
+    :type input_dir: Union[str, Path]
     :param output_dir: 总结输出文件夹路径
-    :type output_dir: str
+    :type output_dir: Union[str, Path]
     :param processes: 同时处理的进程数，默认为1
     :type processes: int
     :param audio_only: 默认为False，如果设置为True，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。
@@ -111,13 +179,31 @@ def summarize(config: dict[str, str],
     # 转换为Path对象
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
-    
-    # 创建中间目录（使用时间戳避免冲突）
-    interm_dir = output_dir / "intermediates" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = output_dir / "audio_summarizer.log"
     
     # 设置logger
     if logger is None:
-        logger = _setup_logger(output_dir)
+        logger = _setup_logger(log_file)
+    
+    # 读取checkpoint
+    checkpoint = _read_checkpoint(output_dir)
+    logger.info(f"当前checkpoint: {checkpoint}")
+    
+    interm_dir = output_dir / "intermediates"
+    # 创建中间目录（使用时间戳避免冲突）
+    # 如果checkpoint为0，创建新的中间目录；否则使用现有的中间目录
+    if checkpoint == 0:
+        _ensure_dir(interm_dir, logger)
+        # 初始化checkpoint为0
+        _write_checkpoint(output_dir, 0)
+    else:
+        if interm_dir.exists():
+            logger.info(f"使用现有的中间目录: {interm_dir}")
+        else:
+            logger.warning("找不到中间目录，将从头开始")
+            checkpoint = 0
+            _ensure_dir(interm_dir, logger)
+            _write_checkpoint(output_dir, 0)
     
     try:
         bucket_name = config["bucket_name"]
@@ -136,8 +222,8 @@ def summarize(config: dict[str, str],
         exit(1)
 
     # 创建目录
-    interm_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(interm_dir, logger)
+    _ensure_dir(output_dir, logger)
     
     # 验证输入目录
     if not input_dir.exists() or not input_dir.is_dir():
@@ -154,121 +240,146 @@ def summarize(config: dict[str, str],
     logger.info(f"仅音频模式: {audio_only}")
     
     # 步骤1: 寻找音视频文件
-    logger.info("\n" + "=" * 60)
-    logger.info("步骤1: 寻找音视频文件")
-    logger.info("=" * 60)
-    
-    input_json = interm_dir / "inputs.json"
-    finder = AVFinder(input_dir, input_json, logger)
-    if not finder.find_and_save():
-        logger.error("寻找音视频文件失败")
-        exit(1)
-    
-    # 步骤2: 提取音频（如果不是仅音频模式）
-    if not audio_only:
-        logger.info("\n" + "=" * 60)
-        logger.info("步骤2: 提取音频")
+    if checkpoint < STEP_FIND_FILES:
+        logger.info("=" * 60)
+        logger.info("步骤1: 寻找音视频文件")
         logger.info("=" * 60)
         
-        audio_dir = interm_dir / "audios"
-        audio_json = interm_dir / "audios.json"
-        
-        extractor = AudioExtractor(
-            input_json=input_json,
-            output_json=audio_json,
-            audio_dir=audio_dir,
-            ffmpeg_path=ffmpeg_path,
-            ffprobe_path=ffprobe_path,
-            num_processes=processes,
-            logger=logger
-        )
-        
-        if not extractor.process_videos():
-            logger.error("提取音频失败")
+        input_json = interm_dir / "inputs.json"
+        finder = AVFinder(input_dir, input_json, log_file=log_file)
+        if not finder.find_and_save():
+            logger.error("寻找音视频文件失败")
             exit(1)
+        
+        _update_checkpoint(output_dir, logger)
+        checkpoint = STEP_FIND_FILES
+    else:
+        logger.info("✓ 步骤1已完成，跳过")
+        input_json = interm_dir / "inputs.json"
+    
+    # 步骤2: 提取音频（如果不是仅音频模式）
+    audio_dir = interm_dir / "audios"
+    audio_json = interm_dir / "audios.json"
+    
+    if not audio_only:
+        if checkpoint < STEP_EXTRACT_AUDIO:
+            logger.info("=" * 60)
+            logger.info("步骤2: 提取音频")
+            logger.info("=" * 60)
+            
+            extractor = AudioExtractor(
+                input_json=input_json,
+                output_json=audio_json,
+                audio_dir=audio_dir,
+                ffmpeg_path=ffmpeg_path,
+                ffprobe_path=ffprobe_path,
+                num_processes=processes,
+                log_file=log_file
+            )
+            
+            if not extractor.process_videos():
+                logger.error("提取音频失败")
+                exit(1)
+            
+            _update_checkpoint(output_dir, logger)
+            checkpoint = STEP_EXTRACT_AUDIO
+        else:
+            logger.info("✓ 步骤2已完成，跳过")
     else:
         # 如果是仅音频模式，直接复制输入JSON到音频JSON
-        audio_json = interm_dir / "audios.json"
-        shutil.copy2(input_json, audio_json)
-        logger.info("仅音频模式，跳过音频提取步骤")
-    
-    # 检查是否需要OSS上传和API调用
-    if not (bucket_name and bucket_endpoint and access_key_id and access_key_secret and funasr_api_key and deepseek_api_key):
-        logger.warning("\n缺少必要的API密钥或OSS配置，跳过后续步骤")
-        logger.warning("请提供以下参数:")
-        logger.warning("  --bucket-name, --bucket-endpoint")
-        logger.warning("  --access-key-id, --access-key-secret")
-        logger.warning("  --funasr-api-key, --deepseek-api-key")
-        logger.warning("或使用 --config-file 指定配置文件")
-        logger.info("\n已完成本地处理，结果保存在:")
-        logger.info(f"  输入文件列表: {input_json}")
-        logger.info(f"  音频文件列表: {audio_json}")
-        exit(0)
+        if checkpoint < STEP_EXTRACT_AUDIO:
+            shutil.copy2(input_json, audio_json)
+            logger.info("仅音频模式，跳过音频提取步骤")
+            _update_checkpoint(output_dir, logger)
+            checkpoint = STEP_EXTRACT_AUDIO
+        else:
+            logger.info("✓ 仅音频模式步骤2已完成，跳过")
     
     # 步骤3: 上传音频到OSS
-    logger.info("\n" + "=" * 60)
-    logger.info("步骤3: 上传音频到OSS")
-    logger.info("=" * 60)
-    
     oss_json = interm_dir / "oss_urls.json"
-    uploader = OSSUploader(
-        input_json=audio_json,
-        output_json=oss_json,
-        bucket_name=bucket_name,
-        bucket_endpoint=bucket_endpoint,
-        access_key_id=access_key_id,
-        access_key_secret=access_key_secret,
-        num_processes=processes,
-        logger=logger
-    )
     
-    if not uploader.upload_files():
-        logger.error("上传音频到OSS失败")
-        exit(1)
+    if checkpoint < STEP_UPLOAD_OSS:
+        logger.info("=" * 60)
+        logger.info("步骤3: 上传音频到OSS")
+        logger.info("=" * 60)
+        
+        uploader = OSSUploader(
+            input_json=audio_json,
+            output_json=oss_json,
+            bucket_name=bucket_name,
+            bucket_endpoint=bucket_endpoint,
+            access_key_id=access_key_id,
+            access_key_secret=access_key_secret,
+            num_processes=processes,
+            log_file=log_file
+        )
+        
+        if not uploader.upload_files():
+            logger.error("上传音频到OSS失败")
+            exit(1)
+        
+        _update_checkpoint(output_dir, logger)
+        checkpoint = STEP_UPLOAD_OSS
+    else:
+        logger.info("✓ 步骤3已完成，跳过")
     
     # 步骤4: 音频转文字
-    logger.info("\n" + "=" * 60)
-    logger.info("步骤4: 音频转文字")
-    logger.info("=" * 60)
-    
     text_dir = interm_dir / "texts"
     text_json = interm_dir / "texts.json"
-    transcriber = AudioTranscriber(
-        input_json=oss_json,
-        output_json=text_json,
-        text_dir=text_dir,
-        model_api_key=funasr_api_key,
-        num_processes=processes,
-        logger=logger
-    )
     
-    if not transcriber.transcribe_audio():
-        logger.error("音频转文字失败")
-        exit(1)
+    if checkpoint < STEP_TRANSCRIBE:
+        logger.info("=" * 60)
+        logger.info("步骤4: 音频转文字")
+        logger.info("=" * 60)
+        
+        transcriber = AudioTranscriber(
+            input_json=oss_json,
+            output_json=text_json,
+            text_dir=text_dir,
+            model_api_key=funasr_api_key,
+            num_processes=processes,
+            log_file=log_file
+        )
+        
+        if not transcriber.transcribe_audio():
+            logger.error("音频转文字失败")
+            exit(1)
+        
+        _update_checkpoint(output_dir, logger)
+        checkpoint = STEP_TRANSCRIBE
+    else:
+        logger.info("✓ 步骤4已完成，跳过")
     
     # 步骤5: 总结文字
-    logger.info("\n" + "=" * 60)
-    logger.info("步骤5: 总结文字")
-    logger.info("=" * 60)
-    
     summary_dir = output_dir / "summaries"
     summary_json = interm_dir / "summaries.json"
-    summarizer = TextSummarizer(
-        input_json=text_json,
-        output_json=summary_json,
-        summary_dir=summary_dir,
-        model_api_key=deepseek_api_key,
-        num_processes=processes,
-        origin_json=input_json,  # 添加原视频路径
-        logger=logger
-    )
     
-    if not summarizer.summarize_texts():
-        logger.error("总结文字失败")
-        exit(1)
+    if checkpoint < STEP_SUMMARIZE:
+        logger.info("=" * 60)
+        logger.info("步骤5: 总结文字")
+        logger.info("=" * 60)
+        
+        summarizer = TextSummarizer(
+            input_json=text_json,
+            output_json=summary_json,
+            summary_dir=summary_dir,
+            model_api_key=deepseek_api_key,
+            num_processes=processes,
+            origin_json=input_json,
+            log_file=log_file
+        )
+        
+        if not summarizer.summarize_texts():
+            logger.error("总结文字失败")
+            exit(1)
+        
+        _update_checkpoint(output_dir, logger)
+        checkpoint = STEP_SUMMARIZE
+    else:
+        logger.info("✓ 步骤5已完成，跳过")
     
     # 完成
-    logger.info("\n" + "=" * 60)
+    logger.info("=" * 60)
     logger.info("音频总结流程完成!")
     logger.info("=" * 60)
     logger.info(f"总结文件保存在: {summary_dir}")
@@ -278,13 +389,16 @@ def summarize(config: dict[str, str],
     # 显示总结文件列表
     summary_files = list(summary_dir.glob("*.md"))
     if summary_files:
-        logger.info(f"\n生成 {len(summary_files)} 个总结文件:")
+        logger.info(f"生成 {len(summary_files)} 个总结文件:")
         for summary_file in sorted(summary_files):
             logger.info(f"  {summary_file.name}")
+    
+    # 标记为完成
+    _write_checkpoint(output_dir, STEP_COMPLETE)
 
-def _setup_logger(output_dir: Path) -> logging.Logger:
+def _setup_logger(log_file: Path) -> logging.Logger:
     """配置logger"""
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("AudioSummarizer")
     logger.setLevel(logging.INFO)
     
     # 避免重复添加handler
@@ -292,15 +406,15 @@ def _setup_logger(output_dir: Path) -> logging.Logger:
         # 控制台handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_formatter = logging.Formatter('[AudioSummarizer] %(asctime)s - %(levelname)s - %(message)s')
         console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
         
         # 文件handler
-        log_file = output_dir / "audio_summarizer.log"
+        _ensure_dir(log_file.parent, logger)  # 确保日志文件所在目录存在
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(logging.INFO)
-        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_formatter = logging.Formatter('[AudioSummarizer] %(asctime)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
 

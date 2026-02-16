@@ -1,10 +1,17 @@
 import os
 import sys
+import oss2
 import json
 import time
+import logging
+import dashscope
 import subprocess
 from pathlib import Path
-from typing import List, Set, Dict, Tuple
+from openai import OpenAI
+from urllib import request
+from http import HTTPStatus
+from typing import List, Set, Dict, Union
+from dashscope.audio.asr import Transcription
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class AVFinder:
@@ -19,7 +26,7 @@ class AVFinder:
         '.mpg', '.mpeg'
     }
     
-    def __init__(self, input_dir: Path, output_json: Path, logger=None):
+    def __init__(self, input_dir: Union[str, Path], output_json: Union[str, Path], logger=None, log_file: Union[str, Path] = None):
         """
         初始化音视频文件查找器
         
@@ -27,20 +34,15 @@ class AVFinder:
             input_dir: 输入目录路径，递归遍历此目录寻找音视频文件
             output_json: 输出的含有音视频文件路径列表的JSON文件路径
             logger: 日志记录器对象，若为空则自行创建
+            log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
-        self.input_dir = input_dir
-        self.output_json = output_json
+        self.input_dir = Path(input_dir)
+        self.output_json = Path(output_json)
+        self.log_file = Path(log_file) if log_file else None
         
         # 设置logger
         if logger is None:
-            import logging
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.INFO)
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
+            self._setup_logger()
         else:
             self.logger = logger
         
@@ -53,6 +55,38 @@ class AVFinder:
         # 验证目录
         self._validate_directories()
     
+    def _setup_logger(self):
+        self.logger = logging.getLogger("AVFinder")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            # 控制台handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('[AVFinder] %(asctime)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+        
+            # 文件handler
+            if self.log_file:
+                # 使用自定义日志文件
+                log_file_path = Path(self.log_file)
+                log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用自定义日志文件: {log_file_path}")
+            else:
+                # 使用默认日志文件
+                output_dir = self.output_json.parent
+                output_dir.mkdir(parents=True, exist_ok=True)
+                log_file_path = output_dir / "AVFinder.log"
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用默认日志文件: {log_file_path}")
+            
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('[AVFinder] %(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
+
     def _validate_directories(self) -> None:
         """验证输入和输出目录"""
         # 验证输入目录
@@ -180,7 +214,7 @@ class AVFinder:
             output_file.parent.mkdir(parents=True, exist_ok=True)
             
             # 写入JSON文件
-            with open(output_file, 'w', encoding='utf-8') as f:
+            with open(str(output_file), 'w', encoding='utf-8') as f:
                 json.dump(self.audio_files, f, ensure_ascii=False, indent=2)
             
             self.logger.info(f"JSON文件已保存: {output_file}")
@@ -273,8 +307,9 @@ class AudioExtractor:
         '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus'
     }
 
-    def __init__(self, input_json: Path, output_json: Path, audio_dir: Path, 
-                 ffmpeg_path: Path, ffprobe_path: Path, num_processes: int = 1, logger=None):
+    def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], audio_dir: Union[str, Path], 
+                 ffmpeg_path: Union[str, Path], ffprobe_path: Union[str, Path], num_processes: int = 1, logger=None, 
+                 log_file: Union[str, Path] = None):
         """
         初始化音频提取器
         
@@ -286,24 +321,19 @@ class AudioExtractor:
             ffprobe_path: ffprobe可执行文件路径
             num_processes: 并行进程数，默认为1
             logger: 日志记录器对象，若为空则自行创建
+            log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
-        self.input_json = input_json
-        self.output_json = output_json
-        self.audio_dir = audio_dir
-        self.ffmpeg_path = ffmpeg_path
-        self.ffprobe_path = ffprobe_path
+        self.input_json = Path(input_json)
+        self.output_json = Path(output_json)
+        self.audio_dir = Path(audio_dir)
+        self.ffmpeg_path = Path(ffmpeg_path)
+        self.ffprobe_path = Path(ffprobe_path)
         self.num_processes = num_processes
+        self.log_file = Path(log_file) if log_file else None
         
         # 设置logger
         if logger is None:
-            import logging
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.INFO)
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
+            self._setup_logger()
         else:
             self.logger = logger
         
@@ -322,14 +352,36 @@ class AudioExtractor:
         self.audio_dir.mkdir(parents=True, exist_ok=True)
     
     def _setup_logger(self):
-        # 如果用户传入 logger，此处可做额外配置；保留占位以避免 AttributeError
-        if not hasattr(self.logger, 'info'):
-            class Dummy:
-                def info(self, *a, **k): pass
-                def warning(self, *a, **k): pass
-                def error(self, *a, **k): pass
-                def debug(self, *a, **k): pass
-            self.logger = Dummy()
+        self.logger = logging.getLogger("AudioExtractor")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            # 控制台handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('[AudioExtractor] %(asctime)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+        
+            # 文件handler
+            if self.log_file:
+                # 使用自定义日志文件
+                log_file_path = Path(self.log_file)
+                log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用自定义日志文件: {log_file_path}")
+            else:
+                # 使用默认日志文件
+                output_dir = self.audio_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+                log_file_path = output_dir / "AudioExtractor.log"
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用默认日志文件: {log_file_path}")
+            
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('[AudioExtractor] %(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
     
     def _load_video_list(self):
         """从JSON文件加载视频列表"""
@@ -416,7 +468,7 @@ class AudioExtractor:
                 return idx, False, "输入音频文件不存在", "", 0, 0
         
         # 生成音频文件名：索引+1，补齐三位数，保持原扩展名
-        audio_filename = f"{idx+1:03d}{extension}"
+        audio_filename = f"{idx+1:03d}.mp3"
         audio_path = self.audio_dir / audio_filename
         
         # 检查输出目录中编号对应的音频文件是否正确
@@ -472,7 +524,7 @@ class AudioExtractor:
 
     def _check_output_directory(self):
         """检查输出目录内容"""
-        self.logger.info(f"\n音频目录内容:")
+        self.logger.info(f"音频目录内容:")
         if self.audio_dir.exists():
             # 获取所有音频文件
             audio_files = []
@@ -661,9 +713,9 @@ class AudioExtractor:
 class OSSUploader:
     """上传音频到OSS类"""
     
-    def __init__(self, input_json: Path, output_json: Path, bucket_name: str, 
+    def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], bucket_name: str, 
                  bucket_endpoint: str, access_key_id: str, access_key_secret: str, 
-                 num_processes: int = 1, logger=None):
+                 num_processes: int = 1, logger=None, log_file: Union[str, Path] = None):
         """
         初始化OSS上传器
         
@@ -676,31 +728,25 @@ class OSSUploader:
             access_key_secret: 阿里云access key secret
             num_processes: 并行进程数，默认为1
             logger: 日志记录器对象，若为空则自行创建
+            log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
-        self.input_json = input_json
-        self.output_json = output_json
+        self.input_json = Path(input_json)
+        self.output_json = Path(output_json)
         self.bucket_name = bucket_name
         self.bucket_endpoint = bucket_endpoint
         self.access_key_id = access_key_id
         self.access_key_secret = access_key_secret
         self.num_processes = num_processes
+        self.log_file = Path(log_file) if log_file else None
         
         # 设置logger
         if logger is None:
-            import logging
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.INFO)
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
+            self._setup_logger()
         else:
             self.logger = logger
         
         # 初始化OSS客户端
         try:
-            import oss2
             auth = oss2.Auth(self.access_key_id, self.access_key_secret)
             self.bucket = oss2.Bucket(auth, self.bucket_endpoint, self.bucket_name)
             self.logger.info(f"OSS客户端初始化成功，存储桶: {self.bucket_name}")
@@ -860,14 +906,46 @@ class OSSUploader:
             self.logger.info(f"平均速度: {processed/(total_time/60):.1f} 文件/分钟")
         
         return self.success_count > 0
+    
+    def _setup_logger(self):
+        self.logger = logging.getLogger("OSSUploader")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            # 控制台handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('[OSSUploader] %(asctime)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+        
+            # 文件handler
+            if self.log_file:
+                # 使用自定义日志文件
+                log_file_path = Path(self.log_file)
+                log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用自定义日志文件: {log_file_path}")
+            else:
+                # 使用默认日志文件
+                output_dir = self.output_json.parent
+                output_dir.mkdir(parents=True, exist_ok=True)
+                log_file_path = output_dir / "OSSUploader.log"
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用默认日志文件: {log_file_path}")
+            
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('[OSSUploader] %(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
 
 
 
 class AudioTranscriber:
     """音频转文字类"""
     
-    def __init__(self, input_json: Path, output_json: Path, text_dir: Path, 
-                 model_api_key: str, num_processes: int = 1, logger=None):
+    def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], text_dir: Union[str, Path], 
+                 model_api_key: str, num_processes: int = 1, logger=None, log_file: Union[str, Path] = None):
         """
         初始化音频转录器
         
@@ -878,23 +956,18 @@ class AudioTranscriber:
             model_api_key: Fun-ASR模型API key
             num_processes: 并行进程数，默认为1
             logger: 日志记录器对象，若为空则自行创建
+            log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
-        self.input_json = input_json
-        self.output_json = output_json
-        self.text_dir = text_dir
+        self.input_json = Path(input_json)
+        self.output_json = Path(output_json)
+        self.text_dir = Path(text_dir)
         self.model_api_key = model_api_key
         self.num_processes = num_processes
+        self.log_file = Path(log_file) if log_file else None
         
         # 设置logger
         if logger is None:
-            import logging
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.INFO)
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
+            self._setup_logger()
         else:
             self.logger = logger
         
@@ -958,10 +1031,6 @@ class AudioTranscriber:
     def _transcribe_batch(self, batch_urls: List[str], batch_index: int) -> List[str]:
         """转录一个批次的音频URL"""
         try:
-            import dashscope
-            from dashscope.audio.asr import Transcription
-            from http import HTTPStatus
-            from urllib import request
             
             # 设置API配置
             dashscope.base_http_api_url = 'https://dashscope.aliyuncs.com/api/v1'
@@ -1141,14 +1210,47 @@ class AudioTranscriber:
             self.logger.info(f"平均速度: {self.total_urls/(total_time/60):.1f} 音频/分钟")
         
         return self.success_count > 0
+    
+    def _setup_logger(self):
+        self.logger = logging.getLogger("AudioTranscriber")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            # 控制台handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('[AudioTranscriber] %(asctime)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+        
+            # 文件handler
+            if self.log_file:
+                # 使用自定义日志文件
+                log_file_path = Path(self.log_file)
+                log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用自定义日志文件: {log_file_path}")
+            else:
+                # 使用默认日志文件
+                output_dir = self.text_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+                log_file_path = output_dir / "AudioTranscriber.log"
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用默认日志文件: {log_file_path}")
+            
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('[AudioTranscriber] %(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
 
 
 
 class TextSummarizer:
     """总结文字类"""
     
-    def __init__(self, input_json: Path, output_json: Path, summary_dir: Path, 
-                 model_api_key: str, num_processes: int = 1, origin_json: Path = None, logger=None):
+    def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], summary_dir: Union[str, Path], 
+                 model_api_key: str, num_processes: int = 1, origin_json: Union[str, Path] = None, logger=None, 
+                 log_file: Union[str, Path] = None):
         """
         初始化文本总结器
         
@@ -1160,24 +1262,19 @@ class TextSummarizer:
             num_processes: 并行进程数，默认为1
             origin_json: 包含每个文本文件对应的原视频路径的列表的JSON文件路径，若为空则不在生成的总结头部添加原视频路径
             logger: 日志记录器对象，若为空则自行创建
+            log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
-        self.input_json = input_json
-        self.output_json = output_json
-        self.summary_dir = summary_dir
+        self.input_json = Path(input_json)
+        self.output_json = Path(output_json)
+        self.summary_dir = Path(summary_dir)
         self.model_api_key = model_api_key
         self.num_processes = num_processes
-        self.origin_json = origin_json
+        self.origin_json = Path(origin_json) if origin_json else None
+        self.log_file = Path(log_file) if log_file else None
         
         # 设置logger
         if logger is None:
-            import logging
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.INFO)
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-                handler.setFormatter(formatter)
-                self.logger.addHandler(handler)
+            self._setup_logger()
         else:
             self.logger = logger
         
@@ -1271,7 +1368,6 @@ class TextSummarizer:
             prompt = self._create_prompt(text_content)
             
             # 调用Deepseek API
-            from openai import OpenAI
             
             client = OpenAI(
                 api_key=self.model_api_key,
@@ -1416,3 +1512,35 @@ class TextSummarizer:
             self.logger.info(f"平均速度: {processed/(total_time/60):.1f} 文本/分钟")
         
         return self.success_count > 0
+    
+    def _setup_logger(self):
+        self.logger = logging.getLogger("TextSummarizer")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            # 控制台handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter('[TextSummarizer] %(asctime)s - %(levelname)s - %(message)s')
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+        
+            # 文件handler
+            if self.log_file:
+                # 使用自定义日志文件
+                log_file_path = Path(self.log_file)
+                log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用自定义日志文件: {log_file_path}")
+            else:
+                # 使用默认日志文件
+                output_dir = self.summary_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+                log_file_path = output_dir / "TextSummarizer.log"
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+                self.logger.info(f"使用默认日志文件: {log_file_path}")
+            
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter('[TextSummarizer] %(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            self.logger.addHandler(file_handler)
