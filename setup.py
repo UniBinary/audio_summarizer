@@ -18,15 +18,12 @@ setup(
     url="https://github.com/UniBinary/audio_summarizer",     # 仓库地址或项目主页
 
     packages=find_packages(),
-    package_data={
-        "audiosummarizer": ["assets/*",]
-    },
 
     python_requires=">=3.8",
     install_requires=[
         "oss2>=2.19.1",  # 阿里云OSS SDK
         "dashscope>=1.25.12",  # 阿里云DashScope SDK
-        "openai>=1.0.0",  # DeepSeek API客户端
+        "openai>=2.17.0",  # DeepSeek API客户端
         # 在此添加运行时依赖，例如 "ffmpeg-python>=0.2.0"
     ],
 
