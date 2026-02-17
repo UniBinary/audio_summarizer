@@ -2,7 +2,6 @@ import json
 import argparse
 import logging
 import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Union
 
@@ -71,7 +70,8 @@ def summarize_cli():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         processes=args.processes,
-        audio_only=args.audio_only
+        audio_only=args.audio_only,
+        logger=logger
     )
 
 

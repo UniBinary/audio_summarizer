@@ -2,7 +2,7 @@
 
 一个用于自动处理音视频文件并生成文字总结的Python工具。
 
-版本：1.1
+版本：**Version 1 Hotfix 1** 的第1次修订 - 1.1.1
 
 ## 🚀 功能特点
 
@@ -42,28 +42,26 @@
 
 ## 📦 安装
 
-### 1. 克隆项目
+### pip安装
+
+```bash
+pip install audio_summarizer
+```
+
+### git克隆安装
+
+#### 1. 克隆项目
 
 ```bash
 git clone https://github.com/UniBinary/audio_summarizer.git
 cd audio_summarizer
 ```
 
-### 2. 安装依赖
+#### 2. 安装
 
 ```bash
-pip install -e .
+pip install .
 ```
-
-或者手动安装依赖：
-
-```bash
-pip install oss2>=2.19.1 dashscope>=1.25.12 openai
-```
-
-### 3. 准备资源文件
-
-将 `ffmpeg.exe` 和 `ffprobe.exe` 放在 `audiosummarizer/assets/` 目录下。
 
 ## ⚙️ 配置
 
@@ -83,22 +81,24 @@ pip install oss2>=2.19.1 dashscope>=1.25.12 openai
 
 ### 2. 创建配置文件
 
-创建 `config.json` 文件：
+创建JSON配置文件：
 
 ```json
 {
-  "bucket-name": "your-bucket-name",
-  "bucket-endpoint": "https://oss-cn-beijing.aliyuncs.com",
-  "bucket-access-key-id": "your-access-key-id",
-  "bucket-access-key-secret": "your-access-key-secret",
-  "model-api-key": "your-funasr-api-key",
-  "deepseek-api-key": "your-deepseek-api-key"
+  "bucket_name": "your-bucket-name",
+  "bucket_endpoint": "your-bucket-endpoint",
+  "bucket_access_key_id": "your-access-key-id",
+  "bucket_access_key_secret": "your-access-key-secret",
+  "funasr_api_key": "your-funasr-api-key",
+  "deepseek_api_key": "your-deepseek-api-key"
 }
 ```
 
 ## 🚀 使用方法
 
 ### 命令行方式
+
+**以下`audiosummarizer`命令均可替换为`sumaudio`（命令别名）**
 
 ```bash
 # 基本用法（使用配置文件）
@@ -109,60 +109,42 @@ audiosummarizer --input-dir /path/to/videos --output-dir /path/to/output --proce
 
 # 仅音频模式（输入目录只有音频文件）
 audiosummarizer --input-dir /path/to/audios --output-dir /path/to/output --audio-only --config-file config.json
-
-# 断点续传（自动从上次中断处继续）
-audiosummarizer --input-dir /path/to/videos --output-dir /path/to/output --config-file config.json
-
-# 直接指定所有参数
-audiosummarizer --input-dir /path/to/videos --output-dir /path/to/output \
-  --bucket-name your-bucket --bucket-endpoint https://oss-cn-beijing.aliyuncs.com \
-  --access-key-id your-key-id --access-key-secret your-key-secret \
-  --funasr-api-key your-funasr-key --deepseek-api-key your-deepseek-key
 ```
 
 ### Python API方式
 
+**以下Path均可使用字符串路径（接受类型为`Union[str, pathlib.Path]`）**
+
 ```python
 from audiosummarizer import summarize
 from pathlib import Path
+from logging import getLogger
+
+logger = getLogger("Demo")
+
+config = {
+    "bucket_name": "your-bucket-name",
+    "bucket_endpoint": "your-bucket-endpoint",
+    "bucket_access_key_id": "your-access-key-id",
+    "bucket_access_key_secret": "your-access-key-secret",
+    "funasr_api_key": "your-funasr-api-key",
+    "deepseek_api_key": "your-deepseek-api-key"
+}
 
 # 使用配置文件
 summarize(
+    config=config,
     input_dir=Path("/path/to/videos"),
     output_dir=Path("/path/to/output"),
-    processes=4,
-    audio_only=False,
-    config_file="config.json"
-)
-
-# 直接指定参数
-summarize(
-    input_dir="/path/to/videos",
-    output_dir="/path/to/output",
-    processes=4,
-    audio_only=False,
-    bucket_name="your-bucket",
-    bucket_endpoint="https://oss-cn-beijing.aliyuncs.com",
-    access_key_id="your-key-id",
-    access_key_secret="your-key-secret",
-    funasr_api_key="your-funasr-key",
-    deepseek_api_key="your-deepseek-key"
+    processes=4, # 可选参数，指定使用的进程数，默认为1
+    audio_only=False, # 可选参数，是否不提取视频中的音频，建议在输入目录只有音频文件时设置为True
+    logger=logger, # 可选参数，传入自定义logger实例，如果不传入则自动创建logger
 )
 ```
 
 ## 🔄 处理流程
 
 项目按照以下步骤处理音视频文件：
-
-```mermaid
-graph LR
-    A[寻找音视频文件] --> B[提取音频]
-    B --> C[上传音频到OSS]
-    C --> D[音频转文字]
-    D --> E[总结文字]
-```
-
-### 步骤详解
 
 1. **寻找音视频文件** (`AVFinder`)
    - 递归扫描输入目录
@@ -189,7 +171,7 @@ graph LR
 5. **总结文字** (`TextSummarizer`)
    - 使用DeepSeek API生成文字总结
    - 输出Markdown格式
-   - 在总结开头添加原视频链接（如果提供）
+   - 在总结开头添加原视频链接
    - 多进程并行处理
 
 ## 📁 输出文件结构
@@ -198,22 +180,15 @@ graph LR
 output_dir/
 ├── audio_summarizer.log          # 主日志文件
 ├── checkpoint.txt                # 断点续传状态文件
-├── intermediates/
-│   └── YYYYMMDD_HHMMSS/          # 中间文件（时间戳目录）
-│       ├── inputs.json           # 输入文件列表
-│       ├── audios.json           # 音频文件列表
-│       ├── oss_urls.json         # OSS URL列表
-│       ├── texts.json            # 文本文件路径列表
-│       ├── summaries.json        # 总结文件路径列表
-│       ├── audios/               # 提取的音频文件
-│       ├── texts/                # 转录的文本文件
-│       └── summaries/            # 生成的总结文件
-│       ├── AVFinder.log          # 文件查找器日志
-│       ├── AudioExtractor.log    # 音频提取器日志
-│       ├── OSSUploader.log       # OSS上传器日志
-│       ├── AudioTranscriber.log  # 音频转录器日志
-│       └── TextSummarizer.log    # 文本总结器日志
-└── summaries/                    # 最终总结文件（符号链接）
+├── intermediates/                # 中间文件目录 
+│   ├── inputs.json           # 输入文件列表
+│   ├── audios.json           # 音频文件列表
+│   ├── oss_urls.json         # OSS URL列表
+│   ├── texts.json            # 文本文件路径列表
+│   ├── summaries.json        # 总结文件路径列表
+│   ├── audios/               # 提取的音频文件
+│   └── texts/                # 转录的文本文件
+└── summaries/                    # 最终总结文件
     ├── 001.md
     ├── 002.md
     └── ...
@@ -232,37 +207,105 @@ output_dir/
 
 ## 🛠️ 类说明
 
+**该项目的所有类均可以独立使用**
+
 ### AVFinder
 - **功能**：查找音视频文件
 - **参数**：`input_dir`, `output_json`, `logger`, `log_file`
 - **方法**：`find_and_save()`
+- **docstring**：
+```
+初始化音视频文件查找器
+
+Args:
+   input_dir: 输入目录路径，递归遍历此目录寻找音视频文件
+   output_json: 输出的含有音视频文件路径列表的JSON文件路径
+   logger: 日志记录器对象，若为空则自行创建
+   log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
+```
 
 ### AudioExtractor
 - **功能**：从视频中提取音频
 - **参数**：`input_json`, `output_json`, `audio_dir`, `ffmpeg_path`, `ffprobe_path`, `num_processes`, `logger`, `log_file`
 - **方法**：`process_videos()`
+- **docstring**：
+```
+初始化音频提取器
+
+Args:
+   input_json: 输入的含有音视频文件路径列表的JSON文件路径
+   output_json: 输出的包含原有的音频文件和从视频中提取的音频文件的路径列表的JSON文件路径
+   audio_dir: 提取后的音频存放目录路径
+   ffmpeg_path: ffmpeg可执行文件路径
+   ffprobe_path: ffprobe可执行文件路径
+   num_processes: 并行进程数，默认为1
+   logger: 日志记录器对象，若为空则自行创建
+   log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
+```
 
 ### OSSUploader
 - **功能**：上传文件到阿里云OSS
 - **参数**：`input_json`, `output_json`, `bucket_name`, `bucket_endpoint`, `access_key_id`, `access_key_secret`, `num_processes`, `logger`, `log_file`
 - **方法**：`upload_files()`
+- **docstring**：
+```
+初始化OSS上传器
+
+Args:
+   input_json: 输入的包含原有的音频文件和从视频中提取的音频文件的路径列表的JSON文件路径
+   output_json: 输出的包含所有音频文件的公网URL的JSON文件路径
+   bucket_name: 阿里云OSS存储桶名
+   bucket_endpoint: 阿里云OSS存储桶endpoint
+   access_key_id: 阿里云access key ID
+   access_key_secret: 阿里云access key secret
+   num_processes: 并行进程数，默认为1
+   logger: 日志记录器对象，若为空则自行创建
+   log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
+```
 
 ### AudioTranscriber
 - **功能**：音频转文字
 - **参数**：`input_json`, `output_json`, `text_dir`, `model_api_key`, `num_processes`, `logger`, `log_file`
 - **方法**：`transcribe_audio()`
+- **docstring**：
+```
+初始化音频转录器
+
+Args:
+   input_json: 输入的包含所有音频文件的公网URL的JSON文件路径
+   output_json: 输出的包含所有音频转写生成的文字文件的路径的JSON文件路径
+   text_dir: 存放音频转写生成的文字文件的文件夹
+   model_api_key: Fun-ASR模型API key
+   num_processes: 并行进程数，默认为1
+   logger: 日志记录器对象，若为空则自行创建
+   log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
+```
 
 ### TextSummarizer
 - **功能**：总结文字
 - **参数**：`input_json`, `output_json`, `summary_dir`, `model_api_key`, `num_processes`, `origin_json`, `logger`, `log_file`
 - **方法**：`summarize_texts()`
+- **docstring**：
+```
+初始化文本总结器
+
+Args:
+   input_json: 输入的包含所有音频转写生成的文字文件的路径的JSON文件路径
+   output_json: 输出的包含所有Deepseek生成的文字总结文件的路径的JSON文件路径
+   summary_dir: 存放Deepseek生成的文字总结的文件夹
+   model_api_key: Deepseek模型API key
+   num_processes: 并行进程数，默认为1
+   origin_json: 包含每个文本文件对应的原视频路径的列表的JSON文件路径，若为空则不在生成的总结头部添加原视频路径
+   logger: 日志记录器对象，若为空则自行创建
+   log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
+```
 
 ## ⚠️ 注意事项
 
 1. **费用控制**：处理大量文件前，建议先测试小批量文件
 2. **网络要求**：需要稳定的网络连接访问OSS和API
-3. **文件大小**：单个音频文件不宜过大，建议分割长音频
-4. **API限制**：注意各API的调用频率和并发限制
+3. **文件大小**：单个音频文件时长不能超过12小时，大小不能超过2GB，请分割长音频。
+4. **API限制**：注意各API的调用频率和并发限制，合理设置进程数
 5. **隐私保护**：音频内容可能包含敏感信息，请妥善处理
 6. **断点续传**：不要手动删除`checkpoint.txt`和中间目录，否则无法继续处理
 
@@ -278,9 +321,7 @@ output_dir/
 
 ### 日志查看
 
-查看以下日志文件获取详细错误信息：
-- `output_dir/audio_summarizer.log` - 主日志文件
-- `output_dir/intermediates/YYYYMMDD_HHMMSS/*.log` - 各步骤详细日志
+发生错误时，请查看日志文件获取详细错误信息：`output_dir/audio_summarizer.log`
 
 ## 📄 许可证
 
@@ -290,21 +331,6 @@ MIT License
 
 UniBinary - tp114514251@outlook.com
 
-## 🌐 项目地址
+## 🌐 项目网址
 
 GitHub: https://github.com/UniBinary/audio_summarizer
-
-## 📈 版本历史
-
-### 1.1 (2026-02-17)
-- ✅ 新增Checkpoint断点续传功能
-- ✅ 支持跨平台（Windows/macOS/Linux）
-- ✅ 接口标准化，统一路径参数类型
-- ✅ 增强日志系统，支持自定义日志文件
-- ✅ 修复音频转文字编号错乱问题
-- ✅ 修复音频提取警告误报问题
-
-### 1.0a1 (Alpha 1)
-- 初始版本发布
-- 基本音视频处理流程
-- 多进程并行处理支持

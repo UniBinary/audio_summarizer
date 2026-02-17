@@ -1,5 +1,8 @@
-# Audio Summarizer 1.1版本更新说明
-- 上个版本：**Version 1 Alpha 1** - 1.0a1  
+# Audio Summarizer 更新说明
+- 上个版本：**Version 1 Hotfix 0 Alpha 1** - 1.0a1
+- 现版本：**Version 1 Hotfix 1** 的第1次修订 - 1.1.1
+- 该修订不影响使用，故此更新说明说明的是`1.0a1`到`1.1`的更新内容
+- 该包已发布至同名PyPI项目
 
 ## 1.功能增强
 
