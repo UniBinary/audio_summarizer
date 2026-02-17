@@ -555,17 +555,16 @@ class AudioExtractor:
                     actual = set(numbers)
                     missing = sorted(list(expected - actual))
                     
-                    skipped = set()
-                    for already in self.already_an_audio:
-                        try:
-                            num = self.video_paths.index(str(already)) + 1  # 视频列表索引 +1 对应编号
-                            skipped.add(num)
-                        except:
-                            pass
-
-                    # 从缺失编号中排除已跳过的编号
-                    missing = [num for num in missing if num not in skipped]
-
+                    # 找出哪些文件是原始音频文件（不需要在音频目录中）
+                    original_audio_numbers = set()
+                    for idx, video_path in enumerate(self.video_paths):
+                        video_path_obj = Path(video_path)
+                        if video_path_obj.suffix.lower() in self.AUDIO_EXTENSIONS:
+                            original_audio_numbers.add(idx + 1)  # 索引 +1 对应编号
+                    
+                    # 从缺失编号中排除原始音频文件对应的编号
+                    missing = [num for num in missing if num not in original_audio_numbers]
+                    
                     if missing:
                         self.logger.warning(f"缺失编号: {len(missing)} 个")
                         for num in missing[:10]:
@@ -573,7 +572,11 @@ class AudioExtractor:
                         if len(missing) > 10:
                             self.logger.warning(f"  ... 还有 {len(missing)-10} 个")
                     else:
-                        self.logger.info("✓ 所有编号连续完整")
+                        # 如果所有缺失的编号都是原始音频文件，显示信息而不是警告
+                        if original_audio_numbers:
+                            self.logger.info(f"✓ 所有编号连续完整（{len(original_audio_numbers)} 个原始音频文件未复制到音频目录）")
+                        else:
+                            self.logger.info("✓ 所有编号连续完整")
             else:
                 self.logger.info("音频目录为空")
 
@@ -1029,7 +1032,7 @@ class AudioTranscriber:
         return batches
     
     def _transcribe_batch(self, batch_urls: List[str], batch_index: int) -> List[str]:
-        """转录一个批次的音频URL"""
+        """转录一个批次的音频URL，通过URL匹配确保顺序正确"""
         try:
             
             # 设置API配置
@@ -1046,23 +1049,53 @@ class AudioTranscriber:
             
             transcription_response = Transcription.wait(task=task_response.output.task_id)
             
-            results = []
+            # 初始化结果列表，长度与batch_urls相同
+            results = [""] * len(batch_urls)
+            
             if transcription_response.status_code == HTTPStatus.OK:
+                # 调试：打印API返回的数据结构前几个字符
+                self.logger.debug(f"批次 {batch_index} API返回结果数: {len(transcription_response.output['results'])}")
+                
                 for transcription in transcription_response.output['results']:
+                    # 调试：查看转录结果的结构
+                    transcription_str = str(transcription)
+                    if len(transcription_str) > 200:
+                        transcription_str = transcription_str[:200] + "..."
+                    self.logger.debug(f"转录结果结构: {transcription_str}")
+                    
                     if transcription['subtask_status'] == 'SUCCEEDED':
                         url = transcription['transcription_url']
                         result_data = json.loads(request.urlopen(url).read().decode('utf8'))
                         
                         # 格式化转录结果
                         result_str = self._format_transcription_result(result_data)
-                        results.append(result_str)
+                        
+                        # 关键：通过URL匹配找到正确的索引
+                        matched_index = self._match_transcription_to_url(transcription, batch_urls, batch_index)
+                        
+                        if 0 <= matched_index < len(batch_urls):
+                            results[matched_index] = result_str
+                            self.logger.debug(f"匹配成功: 结果放入索引 {matched_index} (URL: {batch_urls[matched_index][:50]}...)")
+                        else:
+                            # 如果无法匹配，记录警告并按顺序放入第一个空位
+                            self.logger.warning(f"批次 {batch_index}: 无法匹配转录结果到原始URL")
+                            for i in range(len(results)):
+                                if results[i] == "":
+                                    results[i] = result_str
+                                    self.logger.warning(f"  结果放入索引 {i} (按顺序)")
+                                    break
                     else:
                         self.logger.error(f'转录失败: {transcription}')
-                        results.append("")  # 失败时返回空字符串
+                        # 失败时保持空字符串
             else:
                 self.logger.error(f'Fun-ASR API错误: {transcription_response.output.message}')
-                # 返回与音频URL数量相同的空字符串列表
+                # 返回空字符串列表
                 results = [""] * len(batch_urls)
+            
+            # 检查是否有未匹配的结果
+            empty_count = sum(1 for r in results if r == "")
+            if empty_count > 0:
+                self.logger.warning(f"批次 {batch_index}: 有 {empty_count} 个结果未匹配到URL")
             
             return results
             
@@ -1073,6 +1106,86 @@ class AudioTranscriber:
             self.logger.error(f"转录批次 {batch_index} 失败: {e}")
             # 返回空字符串列表
             return [""] * len(batch_urls)
+    
+    def _match_transcription_to_url(self, transcription: dict, batch_urls: List[str], batch_index: int) -> int:
+        """
+        将转录结果匹配到原始URL的索引
+        
+        Args:
+            transcription: API返回的转录结果
+            batch_urls: 批次的URL列表
+            batch_index: 批次索引
+            
+        Returns:
+            int: 匹配的索引，如果无法匹配返回-1
+        """
+        # 首先，记录transcription的所有键，以便调试
+        self.logger.debug(f"批次 {batch_index}: transcription keys: {list(transcription.keys())}")
+        
+        # 方法1: 检查transcription中是否包含原始URL信息
+        # Fun-ASR API可能返回file_url字段
+        if 'file_url' in transcription:
+            file_url = transcription['file_url']
+            self.logger.debug(f"批次 {batch_index}: 找到file_url: {file_url[:100]}...")
+            
+            # 尝试匹配URL
+            for i, batch_url in enumerate(batch_urls):
+                # 简化URL匹配：检查URL的关键部分
+                # 提取文件名部分进行匹配
+                batch_filename = self._extract_filename_from_url(batch_url)
+                transcription_filename = self._extract_filename_from_url(file_url)
+                
+                self.logger.debug(f"批次 {batch_index}: 比较 batch_filename='{batch_filename}' vs transcription_filename='{transcription_filename}'")
+                
+                if batch_filename and transcription_filename and batch_filename == transcription_filename:
+                    self.logger.debug(f"批次 {batch_index}: 通过文件名匹配成功: 索引 {i}")
+                    return i
+                
+                # 或者直接检查URL是否包含对方
+                if batch_url in file_url or file_url in batch_url:
+                    self.logger.debug(f"批次 {batch_index}: 通过URL包含关系匹配成功: 索引 {i}")
+                    return i
+        
+        # 方法2: 检查是否有index字段
+        if 'index' in transcription:
+            idx = transcription['index']
+            self.logger.debug(f"批次 {batch_index}: 找到index: {idx}")
+            if 0 <= idx < len(batch_urls):
+                self.logger.debug(f"批次 {batch_index}: 通过index匹配成功: 索引 {idx}")
+                return idx
+        
+        # 方法3: 检查是否有其他可能的字段
+        # 尝试所有字符串字段，看是否包含URL信息
+        for key, value in transcription.items():
+            if isinstance(value, str) and len(value) > 10:
+                # 检查是否包含batch_urls中的任何URL
+                for i, batch_url in enumerate(batch_urls):
+                    # 提取batch_url的基本部分（去除查询参数）
+                    batch_url_simple = batch_url.split('?')[0]
+                    if batch_url_simple in value:
+                        self.logger.debug(f"批次 {batch_index}: 通过字段 '{key}' 匹配成功: 索引 {i}")
+                        return i
+        
+        # 方法4: 如果以上方法都失败，记录详细的调试信息
+        self.logger.warning(f"批次 {batch_index}: 无法通过URL匹配确定索引")
+        self.logger.warning(f"批次 {batch_index}: transcription内容: {str(transcription)[:500]}")
+        
+        # 返回-1表示无法匹配，调用者将按顺序处理
+        return -1
+    
+    def _extract_filename_from_url(self, url: str) -> str:
+        """从URL中提取文件名"""
+        try:
+            # 移除查询参数
+            url_without_query = url.split('?')[0]
+            # 获取最后一部分
+            filename = url_without_query.split('/')[-1]
+            # URL解码（如果包含%编码）
+            import urllib.parse
+            filename = urllib.parse.unquote(filename)
+            return filename
+        except:
+            return ""
     
     def _format_transcription_result(self, result_data: Dict) -> str:
         """格式化转录结果为指定的字符串格式"""
@@ -1213,12 +1326,12 @@ class AudioTranscriber:
     
     def _setup_logger(self):
         self.logger = logging.getLogger("AudioTranscriber")
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)  # 设置为DEBUG以记录调试信息
         
         if not self.logger.handlers:
             # 控制台handler
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
+            console_handler.setLevel(logging.INFO)  # 控制台只显示INFO及以上
             console_formatter = logging.Formatter('[AudioTranscriber] %(asctime)s - %(levelname)s - %(message)s')
             console_handler.setFormatter(console_formatter)
             self.logger.addHandler(console_handler)
@@ -1238,7 +1351,7 @@ class AudioTranscriber:
                 file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
                 self.logger.info(f"使用默认日志文件: {log_file_path}")
             
-            file_handler.setLevel(logging.INFO)
+            file_handler.setLevel(logging.DEBUG)  # 文件记录DEBUG及以上
             file_formatter = logging.Formatter('[AudioTranscriber] %(asctime)s - %(levelname)s - %(message)s')
             file_handler.setFormatter(file_formatter)
             self.logger.addHandler(file_handler)
