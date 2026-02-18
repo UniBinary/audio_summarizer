@@ -26,7 +26,7 @@ class AVFinder:
         '.mpg', '.mpeg'
     }
     
-    def __init__(self, input_dir: Union[str, Path], output_json: Union[str, Path], logger_suffix: str = None, log_file: Union[str, Path] = None):
+    def __init__(self, input_dir: Union[str, Path], output_json: Union[str, Path], logger_suffix: str = None, log_file: Union[str, Path] = None, size_limit: int = None, duration_limit: int = None):
         """
         初始化音视频文件查找器
         
@@ -35,11 +35,15 @@ class AVFinder:
             output_json: 输出的含有音视频文件路径列表的JSON文件路径
             logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.AVFinder"作为logger名，否则使用"AVFinder"
             log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
+            size_limit: 文件大小限制，单位为MB，若给出则不会将超过限制的音视频加入列表
+            duration_limit: 文件时长限制，单位为秒，若给出则不会将超过限制的音视频加入列表
         """
         self.input_dir = Path(input_dir)
         self.output_json = Path(output_json)
         self.log_file = Path(log_file) if log_file else None
         self.logger_suffix = logger_suffix
+        self.size_limit = size_limit
+        self.duration_limit = duration_limit
         
         # 设置logger
         self._setup_logger()
@@ -49,6 +53,8 @@ class AVFinder:
         self.processed_dirs: Set[Path] = set()
         self.skipped_dirs: Set[Path] = set()
         self.total_files_found = 0
+        self.skipped_by_size = 0
+        self.skipped_by_duration = 0
         
         # 验证目录
         self._validate_directories()
@@ -157,6 +163,94 @@ class AVFinder:
             self.logger.warning(f"跳过无法访问的目录 {dir_path}: {e}")
             return True
     
+    def _get_file_duration(self, file_path: Path) -> float:
+        """
+        获取音视频文件的时长（秒）
+        
+        Args:
+            file_path: 文件路径对象
+            
+        Returns:
+            float: 文件时长（秒），如果无法获取则返回None
+        """
+        try:
+            # 使用ffprobe获取时长
+            ffprobe_cmd = None
+            
+            # 尝试不同的ffprobe路径
+            possible_paths = [
+                Path("ffprobe.exe"),
+                Path("ffprobe"),
+                Path(r"C:\ffmpeg\bin\ffprobe.exe"),
+                Path(r"C:\Program Files\ffmpeg\bin\ffprobe.exe"),
+                Path(r"D:\ffmpeg\bin\ffprobe.exe"),
+            ]
+            
+            for probe_path in possible_paths:
+                if probe_path.exists():
+                    ffprobe_cmd = str(probe_path)
+                    break
+            
+            if not ffprobe_cmd:
+                self.logger.debug(f"未找到ffprobe，无法获取文件时长: {file_path}")
+                return None
+            
+            cmd = [
+                ffprobe_cmd,
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(file_path)
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            if result.returncode == 0:
+                return float(result.stdout.strip())
+        except Exception as e:
+            self.logger.debug(f"获取文件时长失败 {file_path}: {e}")
+        return None
+    
+    def _check_file_limits(self, file_path: Path) -> bool:
+        """
+        检查文件是否超过大小或时长限制
+        
+        Args:
+            file_path: 文件路径对象
+            
+        Returns:
+            bool: 如果文件符合限制返回True，否则返回False
+        """
+        # 检查文件大小限制
+        if self.size_limit is not None:
+            try:
+                file_size_mb = file_path.stat().st_size / (1024 * 1024)  # 转换为MB
+                if file_size_mb > self.size_limit:
+                    self.logger.debug(f"跳过文件（大小超出限制）: {file_path} ({file_size_mb:.2f} MB > {self.size_limit} MB)")
+                    self.skipped_by_size += 1
+                    return False
+            except Exception as e:
+                self.logger.debug(f"获取文件大小失败 {file_path}: {e}")
+        
+        # 检查文件时长限制
+        if self.duration_limit is not None:
+            try:
+                duration = self._get_file_duration(file_path)
+                if duration is not None and duration > self.duration_limit:
+                    self.logger.debug(f"跳过文件（时长超出限制）: {file_path} ({duration:.2f} 秒 > {self.duration_limit} 秒)")
+                    self.skipped_by_duration += 1
+                    return False
+            except Exception as e:
+                self.logger.debug(f"检查文件时长限制失败 {file_path}: {e}")
+        
+        return True
+    
     def _scan_directory(self, current_dir: Path) -> None:
         """
         递归扫描目录，查找音视频文件
@@ -174,6 +268,10 @@ class AVFinder:
                     if item.is_file():
                         # 检查是否为音视频文件
                         if self._is_audio_video_file(item):
+                            # 检查文件大小和时长限制
+                            if not self._check_file_limits(item):
+                                continue
+                            
                             # 获取绝对路径并添加到列表
                             abs_path = str(item.absolute())
                             self.audio_files.append(abs_path)
@@ -243,6 +341,8 @@ class AVFinder:
         self.processed_dirs.clear()
         self.skipped_dirs.clear()
         self.total_files_found = 0
+        self.skipped_by_size = 0
+        self.skipped_by_duration = 0
         
         # 开始扫描
         start_time = time.time()
@@ -259,6 +359,15 @@ class AVFinder:
         self.logger.info(f"处理目录数: {len(self.processed_dirs)}")
         self.logger.info(f"跳过目录数: {len(self.skipped_dirs)}")
         self.logger.info(f"找到音视频文件数: {self.total_files_found}")
+        
+        # 显示限制相关的统计信息
+        if self.size_limit is not None:
+            self.logger.info(f"文件大小限制: {self.size_limit} MB")
+            self.logger.info(f"因大小限制跳过的文件数: {self.skipped_by_size}")
+        
+        if self.duration_limit is not None:
+            self.logger.info(f"文件时长限制: {self.duration_limit} 秒")
+            self.logger.info(f"因时长限制跳过的文件数: {self.skipped_by_duration}")
         
         if self.total_files_found == 0:
             self.logger.warning("未找到任何音视频文件!")
@@ -289,12 +398,23 @@ class AVFinder:
         Returns:
             dict: 包含统计信息的字典
         """
-        return {
+        stats = {
             "total_files": self.total_files_found,
             "processed_dirs": len(self.processed_dirs),
             "skipped_dirs": len(self.skipped_dirs),
             "audio_files": self.audio_files[:10] if self.audio_files else []  # 只返回前10个作为示例
         }
+        
+        # 添加限制相关的统计信息
+        if self.size_limit is not None:
+            stats["size_limit_mb"] = self.size_limit
+            stats["skipped_by_size"] = self.skipped_by_size
+        
+        if self.duration_limit is not None:
+            stats["duration_limit_seconds"] = self.duration_limit
+            stats["skipped_by_duration"] = self.skipped_by_duration
+        
+        return stats
 
 
 
@@ -387,6 +507,18 @@ class AudioExtractor:
         try:
             with open(str(self.input_json), 'r', encoding='utf-8-sig') as f:
                 self.video_paths = json.load(f)
+            
+            # 检查并过滤空字符串
+            filtered_paths = []
+            for i, path in enumerate(self.video_paths):
+                if not path or str(path).strip() == "":
+                    self.logger.warning(f"检测到空字符串路径，跳过索引 {i}")
+                else:
+                    filtered_paths.append(path)
+            
+            self.video_paths = filtered_paths
+            self.logger.info(f"加载了 {len(self.video_paths)} 个有效路径（跳过了 {len(self.video_paths) - len(filtered_paths)} 个空字符串）")
+            
         except FileNotFoundError:
             self.logger.error(f"输入JSON文件不存在: {self.input_json}")
             return False
@@ -438,12 +570,19 @@ class AudioExtractor:
         self.logger.debug(f"检查: {audio_path} | 视频时长: {video_duration} 秒 | 音频时长: {audio_duration} 秒")
 
         if video_duration is None or audio_duration is None:
-            self.logger.debug("无法获取时长")
+            self.logger.debug("无法获取时长，无法验证音频正确性")
             return False  # 无法验证，假设不正确
 
         # 检查时长差异（允许5秒差异）
         duration_diff = abs(video_duration - audio_duration)
-        return duration_diff <= 5
+        is_correct = duration_diff <= 5
+        
+        if is_correct:
+            self.logger.debug(f"音频文件验证通过，时长差异: {duration_diff:.2f} 秒")
+        else:
+            self.logger.debug(f"音频文件验证失败，时长差异: {duration_diff:.2f} 秒 > 5秒")
+        
+        return is_correct
     
     def _extract_audio(self, task):
         """提取单个音频文件
@@ -471,16 +610,20 @@ class AudioExtractor:
         
         # 检查输出目录中编号对应的音频文件是否正确
         if audio_path.exists():
+            self.logger.debug(f"音频文件已存在: {audio_path}")
             audio_duration = self._get_duration(audio_path)
             if audio_duration is not None and self._check_audio_correct(input_path, audio_path):
-                return idx, True, "已存在且正确", str(audio_path), audio_path.stat().st_size, audio_duration
-
-            # 音频不正确，删除并重新提取
-            try:
-                audio_path.unlink()
-                self.logger.debug(f"删除不正确的音频文件: {audio_path}")
-            except Exception as e:
-                self.logger.debug(f"删除文件失败 {audio_path}: {e}")
+                self.logger.debug(f"音频文件验证通过，跳过提取: {audio_path}")
+                return idx, True, "已存在且正确（时长差异<5秒）", str(audio_path), audio_path.stat().st_size, audio_duration
+            else:
+                # 音频不正确或无法验证，删除并重新提取
+                self.logger.debug(f"音频文件验证失败或无法验证，删除并重新提取: {audio_path}")
+                try:
+                    audio_path.unlink()
+                    self.logger.debug(f"删除不正确的音频文件: {audio_path}")
+                except Exception as e:
+                    self.logger.debug(f"删除文件失败 {audio_path}: {e}")
+                    return idx, False, f"无法删除不正确的音频文件: {e}", "", 0, 0
         
         # 提取音频
         try:
@@ -636,6 +779,9 @@ class AudioExtractor:
                     if "输入为音频" in message:
                         self.skipped_count += 1
                         status = "↻"
+                    elif "已存在且正确" in message:
+                        self.skipped_count += 1  # 已存在的正确文件也算跳过
+                        status = "↻"
                     else:
                         self.success_count += 1
                         if size:
@@ -700,7 +846,7 @@ class AudioExtractor:
         self.logger.info(f"总文件数: {self.total_files}")
         self.logger.info(f"成功提取: {self.success_count}")
         self.logger.info(f"处理失败: {self.failed_count}")
-        self.logger.info(f"跳过文件: {self.skipped_count}")
+        self.logger.info(f"跳过文件: {self.skipped_count} (包含已存在的正确文件和原始音频文件)")
         self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
         self.logger.info(f"总大小: {self.total_size/1024/1024/1024:.2f} GB")
         
@@ -780,9 +926,17 @@ class OSSUploader:
                 self.logger.error(f"JSON文件不是列表格式: {self.input_json}")
                 return []
             
-            self.total_files = len(file_list)
-            self.logger.info(f"找到 {self.total_files} 个文件需要上传")
-            return file_list
+            # 检查并过滤空字符串
+            filtered_list = []
+            for i, file_path in enumerate(file_list):
+                if not file_path or str(file_path).strip() == "":
+                    self.logger.warning(f"检测到空字符串文件路径，跳过索引 {i}")
+                else:
+                    filtered_list.append(file_path)
+            
+            self.total_files = len(filtered_list)
+            self.logger.info(f"找到 {self.total_files} 个有效文件需要上传（跳过了 {len(file_list) - len(filtered_list)} 个空字符串）")
+            return filtered_list
             
         except FileNotFoundError:
             self.logger.error(f"输入JSON文件不存在: {self.input_json}")
@@ -1047,6 +1201,7 @@ class AudioTranscriber:
         self.total_urls = 0
         self.success_count = 0
         self.failed_count = 0
+        self.skipped_count = 0  # 添加跳过计数器
         self.text_file_paths = []
         
         # 创建文本目录
@@ -1063,9 +1218,17 @@ class AudioTranscriber:
                 self.logger.error(f"JSON文件不是列表格式: {self.input_json}")
                 return []
             
-            self.total_urls = len(url_list)
-            self.logger.info(f"找到 {self.total_urls} 个URL需要转录")
-            return url_list
+            # 检查并过滤空字符串
+            filtered_list = []
+            for i, url in enumerate(url_list):
+                if not url or str(url).strip() == "":
+                    self.logger.warning(f"检测到空字符串URL，跳过索引 {i}")
+                else:
+                    filtered_list.append(url)
+            
+            self.total_urls = len(filtered_list)
+            self.logger.info(f"找到 {self.total_urls} 个有效URL需要转录（跳过了 {len(url_list) - len(filtered_list)} 个空字符串）")
+            return filtered_list
             
         except FileNotFoundError:
             self.logger.error(f"输入JSON文件不存在: {self.input_json}")
@@ -1298,10 +1461,50 @@ class AudioTranscriber:
             self.logger.error("没有找到需要转录的URL")
             return False
         
-        # 将URL分成批次
-        url_batches = self._split_urls_into_batches(url_list)
+        # 过滤掉已有有效文本文件的URL
+        filtered_urls = []
+        skipped_indices = []
         
-        self.logger.info(f"开始转录 {len(url_list)} 个音频")
+        for idx, url in enumerate(url_list):
+            text_filename = f"{idx+1:03d}.txt"
+            text_path = self.text_dir / text_filename
+            
+            if text_path.exists():
+                try:
+                    with open(str(text_path), 'r', encoding='utf-8') as f:
+                        existing_content = f.read()
+                    
+                    # 如果文件已存在且内容非空，跳过转录
+                    if existing_content.strip():
+                        self.logger.debug(f"文本文件已存在且内容有效，跳过转录: {text_path}")
+                        skipped_indices.append(idx)
+                        continue
+                    else:
+                        self.logger.debug(f"文本文件已存在但内容为空，需要重新转录: {text_path}")
+                except Exception as e:
+                    self.logger.debug(f"读取现有文本文件失败 {text_path}: {e}")
+                    # 如果读取失败，继续转录
+            
+            filtered_urls.append((idx, url))  # 保存原始索引和URL
+        
+        self.logger.info(f"原始URL数: {len(url_list)}")
+        self.logger.info(f"需要转录的URL数: {len(filtered_urls)}")
+        self.logger.info(f"跳过的URL数: {len(skipped_indices)} (文件已存在且内容有效)")
+        
+        if not filtered_urls:
+            self.logger.info("所有音频都已转录完成，无需处理")
+            # 仍然需要生成输出JSON
+            self._generate_output_json(url_list, skipped_indices)
+            return True
+        
+        # 提取需要转录的URL
+        urls_to_transcribe = [url for _, url in filtered_urls]
+        original_indices = [idx for idx, _ in filtered_urls]
+        
+        # 将URL分成批次
+        url_batches = self._split_urls_into_batches(urls_to_transcribe)
+        
+        self.logger.info(f"开始转录 {len(urls_to_transcribe)} 个音频")
         self.logger.info(f"使用 {len(url_batches)} 个进程")
         self.logger.info(f"文本目录: {self.text_dir}")
         self.logger.info("-" * 60)
@@ -1341,33 +1544,66 @@ class AudioTranscriber:
                     # 为失败的批次添加空结果
                     result_dict[batch_index] = [""] * len(url_batches[batch_index])
         
-        # 将回传字典转为列表并展开
-        all_results = []
+        # 将回传字典转为列表并展开（只包含实际转录的结果）
+        transcribed_results = []
         for batch_index in sorted(result_dict.keys()):
-            all_results.extend(result_dict[batch_index])
+            transcribed_results.extend(result_dict[batch_index])
         
-        # 保存转录结果到文件
-        self.text_file_paths = []
-        for idx, result_text in enumerate(all_results):
+        # 现在我们需要将转录结果映射回原始索引
+        # 创建一个字典来映射原始索引到转录结果
+        index_to_result = {}
+        for i, (original_idx, url) in enumerate(filtered_urls):
+            if i < len(transcribed_results):
+                index_to_result[original_idx] = transcribed_results[i]
+            else:
+                index_to_result[original_idx] = ""  # 如果结果不够，使用空字符串
+        
+        # 对于跳过的索引，我们需要从文件中读取内容
+        for idx in skipped_indices:
+            text_filename = f"{idx+1:03d}.txt"
+            text_path = self.text_dir / text_filename
+            try:
+                with open(str(text_path), 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+                index_to_result[idx] = existing_content
+            except Exception as e:
+                self.logger.error(f"读取跳过的文件失败 {text_path}: {e}")
+                index_to_result[idx] = ""
+        
+        # 保存转录结果到文件并生成文件路径列表
+        self.text_file_paths = [""] * len(url_list)  # 初始化与原始URL列表相同长度的列表
+        self.skipped_count = len(skipped_indices)  # 设置跳过计数器
+        
+        # 处理所有索引（包括跳过的和实际转录的）
+        for idx in range(len(url_list)):
             text_filename = f"{idx+1:03d}.txt"
             text_path = self.text_dir / text_filename
             
+            # 如果这个索引是跳过的，文件路径已经存在
+            if idx in skipped_indices:
+                self.text_file_paths[idx] = str(text_path)
+                continue
+            
+            # 获取这个索引的转录结果
+            result_text = index_to_result.get(idx, "")
+            
             # 如果转录结果为空，添加空字符串到输出列表
             if not result_text.strip():
-                self.text_file_paths.append("")
+                self.text_file_paths[idx] = ""
                 self.failed_count += 1
                 continue
-                
+            
+            # 保存转录结果到文件
             try:
                 with open(str(text_path), 'w', encoding='utf-8') as f:
                     f.write(result_text)
                 
-                self.text_file_paths.append(str(text_path))
+                self.text_file_paths[idx] = str(text_path)
                 self.success_count += 1
                     
             except Exception as e:
                 self.logger.error(f"保存文本文件失败 {text_filename}: {e}")
-                self.text_file_paths.append("")
+                self.text_file_paths[idx] = ""
                 self.failed_count += 1
         
         # 保存文本文件路径列表到输出JSON
@@ -1388,12 +1624,53 @@ class AudioTranscriber:
         self.logger.info(f"总音频数: {self.total_urls}")
         self.logger.info(f"转录成功: {self.success_count}")
         self.logger.info(f"转录失败: {self.failed_count}")
+        self.logger.info(f"跳过转录: {self.skipped_count} (文件已存在且内容有效)")
         self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
         
         if self.total_urls > 0:
             self.logger.info(f"平均速度: {self.total_urls/(total_time/60):.1f} 音频/分钟")
         
-        return self.success_count > 0
+        return self.success_count > 0 or self.skipped_count > 0
+    
+    def _generate_output_json(self, url_list: List[str], skipped_indices: List[int]) -> bool:
+        """
+        生成输出JSON文件（当所有文件都已跳过时使用）
+        
+        Args:
+            url_list: 原始URL列表
+            skipped_indices: 跳过的索引列表
+            
+        Returns:
+            bool: 操作成功返回True，否则返回False
+        """
+        try:
+            # 生成文件路径列表
+            text_file_paths = [""] * len(url_list)
+            
+            for idx in range(len(url_list)):
+                text_filename = f"{idx+1:03d}.txt"
+                text_path = self.text_dir / text_filename
+                
+                # 如果这个索引是跳过的，添加文件路径
+                if idx in skipped_indices:
+                    text_file_paths[idx] = str(text_path)
+                else:
+                    # 对于非跳过的索引，理论上不应该发生这种情况
+                    # 但如果发生，使用空字符串
+                    text_file_paths[idx] = ""
+            
+            # 保存文本文件路径列表到输出JSON
+            with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                json.dump(text_file_paths, f, ensure_ascii=False, indent=2)
+            
+            self.logger.info(f"文本文件路径列表已保存到: {self.output_json}")
+            self.logger.info(f"所有 {len(skipped_indices)} 个文件都已存在，跳过转录")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"生成输出JSON失败: {e}")
+            return False
     
     def _setup_logger(self):
         logger_name = f"{self.logger_suffix}.AudioTranscriber" if self.logger_suffix else "AudioTranscriber"
@@ -1465,6 +1742,7 @@ class TextSummarizer:
         self.total_texts = 0
         self.success_count = 0
         self.failed_count = 0
+        self.skipped_count = 0  # 添加跳过计数器
         self.summary_file_paths = []
         
         # 创建总结目录
@@ -1488,9 +1766,17 @@ class TextSummarizer:
                 self.logger.error(f"JSON文件不是列表格式: {self.input_json}")
                 return []
             
-            self.total_texts = len(text_paths)
-            self.logger.info(f"找到 {self.total_texts} 个文本文件需要总结")
-            return text_paths
+            # 检查并过滤空字符串
+            filtered_paths = []
+            for i, text_path in enumerate(text_paths):
+                if not text_path or str(text_path).strip() == "":
+                    self.logger.warning(f"检测到空字符串文本路径，跳过索引 {i}")
+                else:
+                    filtered_paths.append(text_path)
+            
+            self.total_texts = len(filtered_paths)
+            self.logger.info(f"找到 {self.total_texts} 个有效文本文件需要总结（跳过了 {len(text_paths) - len(filtered_paths)} 个空字符串）")
+            return filtered_paths
             
         except FileNotFoundError:
             self.logger.error(f"输入JSON文件不存在: {self.input_json}")
@@ -1591,29 +1877,60 @@ class TextSummarizer:
         # 加载原始路径列表
         origin_paths = self._load_origin_paths()
         
-        self.logger.info(f"开始总结 {len(text_paths)} 个文本")
+        # 过滤掉已有有效总结文件的文本
+        filtered_tasks = []
+        skipped_indices = []
+        
+        for idx, text_path in enumerate(text_paths):
+            summary_filename = f"{idx+1:03d}.md"
+            summary_path = self.summary_dir / summary_filename
+            origin_path = origin_paths[idx] if idx < len(origin_paths) else ""
+            
+            if summary_path.exists():
+                try:
+                    with open(str(summary_path), 'r', encoding='utf-8') as f:
+                        existing_content = f.read()
+                    
+                    # 如果总结文件已存在且内容非空，跳过总结
+                    if existing_content.strip():
+                        self.logger.debug(f"总结文件已存在且内容有效，跳过总结: {summary_path}")
+                        skipped_indices.append(idx)
+                        continue
+                    else:
+                        self.logger.debug(f"总结文件已存在但内容为空，需要重新总结: {summary_path}")
+                except Exception as e:
+                    self.logger.debug(f"读取现有总结文件失败 {summary_path}: {e}")
+                    # 如果读取失败，继续总结
+            
+            filtered_tasks.append((idx, text_path, origin_path))
+        
+        self.logger.info(f"原始文本数: {len(text_paths)}")
+        self.logger.info(f"需要总结的文本数: {len(filtered_tasks)}")
+        self.logger.info(f"跳过的文本数: {len(skipped_indices)} (总结文件已存在且内容有效)")
+        
+        if not filtered_tasks:
+            self.logger.info("所有文本都已总结完成，无需处理")
+            # 仍然需要生成输出JSON
+            return self._generate_output_json(text_paths, skipped_indices)
+        
+        self.logger.info(f"开始总结 {len(filtered_tasks)} 个文本")
         self.logger.info(f"使用 {self.num_processes} 个进程")
         self.logger.info(f"总结目录: {self.summary_dir}")
         self.logger.info("-" * 60)
         
         start_time = time.time()
         processed = 0
-        total = len(text_paths)
+        total = len(filtered_tasks)
         
-        # 创建任务列表
-        tasks = []
-        for idx, text_path in enumerate(text_paths):
-            origin_path = origin_paths[idx] if idx < len(origin_paths) else ""
-            tasks.append((idx, text_path, origin_path))
-        
-        # 初始化总结列表
-        summaries = [""] * total
-        self.summary_file_paths = [""] * total
+        # 初始化总结列表（只针对需要总结的文本）
+        summaries = [""] * len(text_paths)  # 保持原始长度
+        self.summary_file_paths = [""] * len(text_paths)  # 保持原始长度
+        self.skipped_count = len(skipped_indices)  # 设置跳过计数器
         
         # 使用进程池
         with ProcessPoolExecutor(max_workers=self.num_processes) as executor:
-            # 提交所有任务
-            future_to_task = {executor.submit(self._summarize_single_text, task): task for task in tasks}
+            # 提交过滤后的任务
+            future_to_task = {executor.submit(self._summarize_single_text, task): task for task in filtered_tasks}
             
             # 处理结果
             for future in as_completed(future_to_task):
@@ -1630,13 +1947,13 @@ class TextSummarizer:
                 
                 if task_success:
                     self.success_count += 1
-                    summaries[idx] = summary_text
+                    summaries[idx] = summary_text  # 使用原始索引
                     status = "✓"
                 else:
                     self.failed_count += 1
                     status = "✗"
                 
-                # 显示进度
+                # 显示进度（使用原始索引+1显示）
                 elapsed = time.time() - start_time
                 progress = processed / total * 100
                 
@@ -1645,7 +1962,7 @@ class TextSummarizer:
                 
                 # 每处理10个文件显示一次汇总
                 if processed % 10 == 0:
-                    summary = f"[进度] {processed}/{total} ({progress:.1f}%) | 成功: {self.success_count} | 失败: {self.failed_count}"
+                    summary = f"[进度] {processed}/{total} ({progress:.1f}%) | 成功: {self.success_count} | 失败: {self.failed_count} | 跳过: {self.skipped_count}"
                     self.logger.info(summary)
                     
                     if processed > 0:
@@ -1655,21 +1972,36 @@ class TextSummarizer:
                         time_info = f"[时间] 已用: {time.strftime('%H:%M:%S', time.gmtime(elapsed))} | 预计剩余: {time.strftime('%H:%M:%S', time.gmtime(eta))}"
                         self.logger.info(time_info)
         
-        # 保存总结到文件
-        for idx, summary_text in enumerate(summaries):
-            if summary_text.strip():  # 只保存非空总结
-                summary_filename = f"{idx+1:03d}.md"
-                summary_path = self.summary_dir / summary_filename
+        # 保存总结到文件并处理跳过的文件
+        for idx in range(len(text_paths)):
+            summary_filename = f"{idx+1:03d}.md"
+            summary_path = self.summary_dir / summary_filename
+            
+            # 如果这个索引是跳过的，文件路径已经存在
+            if idx in skipped_indices:
+                self.summary_file_paths[idx] = str(summary_path)
+                continue
+            
+            # 获取这个索引的总结文本
+            summary_text = summaries[idx]
+            
+            # 如果总结文本为空，添加空字符串到输出列表
+            if not summary_text.strip():
+                self.summary_file_paths[idx] = ""
+                # 注意：这里不增加failed_count，因为已经在任务处理中增加了
+                continue
+            
+            # 保存总结到文件
+            try:
+                with open(str(summary_path), 'w', encoding='utf-8') as f:
+                    f.write(summary_text)
                 
-                try:
-                    with open(str(summary_path), 'w', encoding='utf-8') as f:
-                        f.write(summary_text)
-                    
-                    self.summary_file_paths[idx] = str(summary_path)
-                    
-                except Exception as e:
-                    self.logger.error(f"保存总结文件失败 {summary_filename}: {e}")
-                    self.summary_file_paths[idx] = ""
+                self.summary_file_paths[idx] = str(summary_path)
+                
+            except Exception as e:
+                self.logger.error(f"保存总结文件失败 {summary_filename}: {e}")
+                self.summary_file_paths[idx] = ""
+                # 注意：这里不增加failed_count，因为已经在任务处理中增加了
         
         # 保存总结文件路径列表到输出JSON
         try:
@@ -1689,12 +2021,57 @@ class TextSummarizer:
         self.logger.info(f"总文本数: {self.total_texts}")
         self.logger.info(f"总结成功: {self.success_count}")
         self.logger.info(f"总结失败: {self.failed_count}")
+        self.logger.info(f"跳过总结: {self.skipped_count} (文件已存在且内容有效)")
         self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
         
         if processed > 0:
             self.logger.info(f"平均速度: {processed/(total_time/60):.1f} 文本/分钟")
         
-        return self.success_count > 0
+        return self.success_count > 0 or self.skipped_count > 0
+    
+    def _generate_output_json(self, text_paths: List[str], skipped_indices: List[int]) -> bool:
+        """
+        生成输出JSON文件（当所有文件都已跳过时使用）
+        
+        Args:
+            text_paths: 原始文本文件路径列表
+            skipped_indices: 跳过的索引列表
+            
+        Returns:
+            bool: 操作成功返回True，否则返回False
+        """
+        try:
+            # 生成文件路径列表
+            summary_file_paths = [""] * len(text_paths)
+            
+            for idx in range(len(text_paths)):
+                summary_filename = f"{idx+1:03d}.md"
+                summary_path = self.summary_dir / summary_filename
+                
+                # 如果这个索引是跳过的，添加文件路径
+                if idx in skipped_indices:
+                    summary_file_paths[idx] = str(summary_path)
+                else:
+                    # 对于非跳过的索引，理论上不应该发生这种情况
+                    # 但如果发生，使用空字符串
+                    summary_file_paths[idx] = ""
+            
+            # 保存总结文件路径列表到输出JSON
+            with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                json.dump(summary_file_paths, f, ensure_ascii=False, indent=2)
+            
+            self.logger.info(f"总结文件路径列表已保存到: {self.output_json}")
+            self.logger.info(f"所有 {len(skipped_indices)} 个文件都已存在，跳过总结")
+            
+            # 更新统计信息
+            self.skipped_count = len(skipped_indices)
+            self.summary_file_paths = summary_file_paths
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"生成输出JSON失败: {e}")
+            return False
     
     def _setup_logger(self):
         logger_name = f"{self.logger_suffix}.TextSummarizer" if self.logger_suffix else "TextSummarizer"
