@@ -31,7 +31,7 @@ def summarize_cli():
     若想在Python中调用，请直接调用 summarize() 函数并传入相应参数
     """
     parser = argparse.ArgumentParser(description='音频总结工具 - 从音视频文件中提取音频、转文字并总结')
-    parser.add_argument('--config-file',required=True, help=
+    parser.add_argument('--config-file', '-c', required=True, help=
 """配置字典，包含以下参数：
 - bucket_name: 阿里云OSS存储桶名
 - bucket_endpoint: 阿里云OSS存储桶endpoint
@@ -41,18 +41,19 @@ def summarize_cli():
 - deepseek_api_key: Deepseek模型API key
 - ffmpeg_path: ffmpeg可执行文件路径（若想使用PATH中的ffmpeg，填写"ffmpeg"即可）
 - ffprobe_path: ffprobe可执行文件路径（若想使用PATH中的ffprobe，填写"ffprobe"即可）""")
-    parser.add_argument('--input-dir', required=True,
+    parser.add_argument('--input-dir', '-i', required=True,
                         help='需要处理的包含音视频文件的目录的路径')
-    parser.add_argument('--output-dir', required=True,
+    parser.add_argument('--output-dir', '-o', required=True,
                         help='总结输出文件夹路径')
-    parser.add_argument('--processes', type=int, default=1,
+    parser.add_argument('--processes', '-p', type=int, default=1,
                         help='同时处理的进程数，默认为1')
-    parser.add_argument('--audio-only', action='store_true',
+    parser.add_argument('--audio-only', '-a', action='store_true',
                         help='如果设置，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。')
     
     args = parser.parse_args()
     
-    logger = _setup_logger(Path(args.output_dir) / "audio_summarizer.log")
+    # 创建logger但不传递给summarize函数
+    logger = _setup_logger(Path(args.output_dir) / "audio_summarizer.log", "AudioSummarizer")
 
     # 从配置文件读取参数
     try:
@@ -71,12 +72,12 @@ def summarize_cli():
         output_dir=args.output_dir,
         processes=args.processes,
         audio_only=args.audio_only,
-        logger=logger
+        logger_suffix=None  # 不传递logger_suffix，让summarize使用已有的logger
     )
 
 
 
-def _read_checkpoint(output_dir: Path) -> int:
+def _read_checkpoint(output_dir: Path, logger: logging.Logger) -> int:
     """
     读取checkpoint文件
     
@@ -93,11 +94,11 @@ def _read_checkpoint(output_dir: Path) -> int:
                 content = f.read().strip()
                 return int(content)
         except (ValueError, IOError) as e:
-            logging.getLogger(__name__).warning(f"读取checkpoint文件失败，将从头开始: {e}")
+            logger.warning(f"读取checkpoint文件失败，将从头开始: {e}")
             return 0
     return 0
 
-def _write_checkpoint(output_dir: Path, step: int):
+def _write_checkpoint(output_dir: Path, step: int, logger: logging.Logger):
     """
     写入checkpoint文件
     
@@ -110,7 +111,7 @@ def _write_checkpoint(output_dir: Path, step: int):
         with open(checkpoint_file, 'w', encoding='utf-8') as f:
             f.write(str(step))
     except IOError as e:
-        logging.getLogger(__name__).error(f"写入checkpoint文件失败: {e}")
+        logger.error(f"写入checkpoint文件失败: {e}")
 
 def _update_checkpoint(output_dir: Path, logger: logging.Logger):
     """
@@ -118,11 +119,11 @@ def _update_checkpoint(output_dir: Path, logger: logging.Logger):
     
     Args:
         output_dir: 输出目录
-        logger: 日志记录器
+        logger: logger实例
     """
-    current_step = _read_checkpoint(output_dir)
+    current_step = _read_checkpoint(output_dir, logger)
     new_step = current_step + 1
-    _write_checkpoint(output_dir, new_step)
+    _write_checkpoint(output_dir, new_step, logger)
     logger.info(f"Checkpoint更新: {current_step} -> {new_step}")
 
 
@@ -150,7 +151,7 @@ def summarize(config: dict[str, str],
               output_dir: Union[str, Path],
               processes: int = 1,
               audio_only: bool = False,
-              logger: logging.Logger = None):
+              logger_suffix: str = None):
     """
     audio_summarizer的主函数
     
@@ -172,8 +173,8 @@ def summarize(config: dict[str, str],
     :type processes: int
     :param audio_only: 默认为False，如果设置为True，则不提取视频音轨，建议在输入文件夹中只有音频时设置。否则会消耗额外的OSS空间导致成本上升。
     :type audio_only: bool or None
-    :param logger: 可选的logger实例，如果未给出，将在函数内部创建一个新的logger
-    :type logger: logging.Logger or None
+    :param logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.AudioSummarizer"作为logger名，否则使用"AudioSummarizer"
+    :type logger_suffix: str or None
     """
 
     # 转换为Path对象
@@ -182,8 +183,9 @@ def summarize(config: dict[str, str],
     log_file = output_dir / "audio_summarizer.log"
     
     # 设置logger
-    if logger is None:
-        logger = _setup_logger(log_file)
+    logger_name = f"{logger_suffix}.AudioSummarizer" if logger_suffix else "AudioSummarizer"
+    if not logger.handlers:
+        logger = _setup_logger(log_file, logger_name)
     
     # 读取checkpoint
     checkpoint = _read_checkpoint(output_dir)
@@ -195,7 +197,7 @@ def summarize(config: dict[str, str],
     if checkpoint == 0:
         _ensure_dir(interm_dir, logger)
         # 初始化checkpoint为0
-        _write_checkpoint(output_dir, 0)
+        _write_checkpoint(output_dir, 0, logger)
     else:
         if interm_dir.exists():
             logger.info(f"使用现有的中间目录: {interm_dir}")
@@ -203,7 +205,7 @@ def summarize(config: dict[str, str],
             logger.warning("找不到中间目录，将从头开始")
             checkpoint = 0
             _ensure_dir(interm_dir, logger)
-            _write_checkpoint(output_dir, 0)
+            _write_checkpoint(output_dir, 0, logger)
     
     try:
         bucket_name = config["bucket_name"]
@@ -246,7 +248,7 @@ def summarize(config: dict[str, str],
         logger.info("=" * 60)
         
         input_json = interm_dir / "inputs.json"
-        finder = AVFinder(input_dir, input_json, log_file=log_file)
+        finder = AVFinder(input_dir, input_json, logger_suffix=logger_name, log_file=log_file)
         if not finder.find_and_save():
             logger.error("寻找音视频文件失败")
             exit(1)
@@ -274,6 +276,7 @@ def summarize(config: dict[str, str],
                 ffmpeg_path=ffmpeg_path,
                 ffprobe_path=ffprobe_path,
                 num_processes=processes,
+                logger_suffix=logger_name,
                 log_file=log_file
             )
             
@@ -311,7 +314,9 @@ def summarize(config: dict[str, str],
             access_key_id=access_key_id,
             access_key_secret=access_key_secret,
             num_processes=processes,
-            log_file=log_file
+            logger_suffix=logger_name,
+            log_file=log_file,
+            skip_exists=True  # 启用跳过已存在文件
         )
         
         if not uploader.upload_files():
@@ -338,6 +343,7 @@ def summarize(config: dict[str, str],
             text_dir=text_dir,
             model_api_key=funasr_api_key,
             num_processes=processes,
+            logger_suffix=logger_name,
             log_file=log_file
         )
         
@@ -366,6 +372,7 @@ def summarize(config: dict[str, str],
             model_api_key=deepseek_api_key,
             num_processes=processes,
             origin_json=input_json,
+            logger_suffix=logger_name,
             log_file=log_file
         )
         
@@ -396,9 +403,9 @@ def summarize(config: dict[str, str],
     # 标记为完成
     _write_checkpoint(output_dir, STEP_COMPLETE)
 
-def _setup_logger(log_file: Path) -> logging.Logger:
+def _setup_logger(log_file: Path, logger_name: str = "AudioSummarizer") -> logging.Logger:
     """配置logger"""
-    logger = logging.getLogger("AudioSummarizer")
+    logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
     
     # 避免重复添加handler
@@ -421,4 +428,4 @@ def _setup_logger(log_file: Path) -> logging.Logger:
     return logger
 
 if __name__ == "__main__":
-    summarize()  # 触发命令行参数解析
+    summarize_cli()  # 触发命令行参数解析

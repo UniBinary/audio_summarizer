@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import oss2
 import json
@@ -26,25 +26,23 @@ class AVFinder:
         '.mpg', '.mpeg'
     }
     
-    def __init__(self, input_dir: Union[str, Path], output_json: Union[str, Path], logger=None, log_file: Union[str, Path] = None):
+    def __init__(self, input_dir: Union[str, Path], output_json: Union[str, Path], logger_suffix: str = None, log_file: Union[str, Path] = None):
         """
         初始化音视频文件查找器
         
         Args:
             input_dir: 输入目录路径，递归遍历此目录寻找音视频文件
             output_json: 输出的含有音视频文件路径列表的JSON文件路径
-            logger: 日志记录器对象，若为空则自行创建
+            logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.AVFinder"作为logger名，否则使用"AVFinder"
             log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
         self.input_dir = Path(input_dir)
         self.output_json = Path(output_json)
         self.log_file = Path(log_file) if log_file else None
+        self.logger_suffix = logger_suffix
         
         # 设置logger
-        if logger is None:
-            self._setup_logger()
-        else:
-            self.logger = logger
+        self._setup_logger()
         
         # 存储类内数据
         self.audio_files: List[str] = []
@@ -56,7 +54,8 @@ class AVFinder:
         self._validate_directories()
     
     def _setup_logger(self):
-        self.logger = logging.getLogger("AVFinder")
+        logger_name = f"{self.logger_suffix}.AVFinder" if self.logger_suffix else "AVFinder"
+        self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(logging.INFO)
         
         if not self.logger.handlers:
@@ -308,7 +307,7 @@ class AudioExtractor:
     }
 
     def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], audio_dir: Union[str, Path], 
-                 ffmpeg_path: Union[str, Path], ffprobe_path: Union[str, Path], num_processes: int = 1, logger=None, 
+                 ffmpeg_path: Union[str, Path], ffprobe_path: Union[str, Path], num_processes: int = 1, logger_suffix: str = None, 
                  log_file: Union[str, Path] = None):
         """
         初始化音频提取器
@@ -320,7 +319,7 @@ class AudioExtractor:
             ffmpeg_path: ffmpeg可执行文件路径
             ffprobe_path: ffprobe可执行文件路径
             num_processes: 并行进程数，默认为1
-            logger: 日志记录器对象，若为空则自行创建
+            logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.AudioExtractor"作为logger名，否则使用"AudioExtractor"
             log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
         self.input_json = Path(input_json)
@@ -330,12 +329,10 @@ class AudioExtractor:
         self.ffprobe_path = Path(ffprobe_path)
         self.num_processes = num_processes
         self.log_file = Path(log_file) if log_file else None
+        self.logger_suffix = logger_suffix
         
         # 设置logger
-        if logger is None:
-            self._setup_logger()
-        else:
-            self.logger = logger
+        self._setup_logger()
         
         # 初始化类内变量
         self.video_paths = []
@@ -352,7 +349,8 @@ class AudioExtractor:
         self.audio_dir.mkdir(parents=True, exist_ok=True)
     
     def _setup_logger(self):
-        self.logger = logging.getLogger("AudioExtractor")
+        logger_name = f"{self.logger_suffix}.AudioExtractor" if self.logger_suffix else "AudioExtractor"
+        self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(logging.INFO)
         
         if not self.logger.handlers:
@@ -670,24 +668,27 @@ class AudioExtractor:
                         time_info = f"[时间] 已用: {time.strftime('%H:%M:%S', time.gmtime(elapsed))} | 预计剩余: {time.strftime('%H:%M:%S', time.gmtime(eta))}"
                         self.logger.info(time_info)
         
-        # 将成功提取的音频路径写回输出 JSON（保持索引一致）
-        if extracted_map:
-            try:
-                # 创建输出列表，用音频路径覆盖原视频路径
-                output_list = []
-                for idx in range(len(self.video_paths)):
-                    if idx in extracted_map:
-                        output_list.append(extracted_map[idx])
-                    else:
-                        # 如果该索引没有提取成功，保持原路径
-                        output_list.append(self.video_paths[idx])
-                
-                # 写回输出JSON
-                with open(str(self.output_json), 'w', encoding='utf-8') as f:
-                    json.dump(output_list, f, ensure_ascii=False, indent=2)
-                    self.logger.info(f"已将 {len(extracted_map)} 个提取成功的音频路径写入 {self.output_json}")
-            except Exception as e:
-                self.logger.error(f"写入输出 JSON 失败: {e}")
+        # 将处理结果写回输出 JSON（保持索引一致）
+        try:
+            # 创建输出列表
+            output_list = []
+            for idx in range(len(self.video_paths)):
+                if idx in extracted_map:
+                    # 提取成功，使用音频路径
+                    output_list.append(extracted_map[idx])
+                else:
+                    # 提取失败或跳过，使用空字符串
+                    output_list.append("")
+            
+            # 写回输出JSON
+            with open(str(self.output_json), 'w', encoding='utf-8') as f:
+                json.dump(output_list, f, ensure_ascii=False, indent=2)
+                self.logger.info(f"已将处理结果写入 {self.output_json}")
+                self.logger.info(f"  - 成功提取: {len(extracted_map)} 个文件")
+                self.logger.info(f"  - 失败/跳过: {len(self.video_paths) - len(extracted_map)} 个文件（输出为空字符串）")
+        except Exception as e:
+            self.logger.error(f"写入输出 JSON 失败: {e}")
+            return False
         
         # 最终统计
         total_time = time.time() - start_time
@@ -718,7 +719,8 @@ class OSSUploader:
     
     def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], bucket_name: str, 
                  bucket_endpoint: str, access_key_id: str, access_key_secret: str, 
-                 num_processes: int = 1, logger=None, log_file: Union[str, Path] = None):
+                 num_processes: int = 1, skip_exists: bool = False,
+                 logger_suffix: str = None, log_file: Union[str, Path] = None):
         """
         初始化OSS上传器
         
@@ -730,7 +732,8 @@ class OSSUploader:
             access_key_id: 阿里云access key ID
             access_key_secret: 阿里云access key secret
             num_processes: 并行进程数，默认为1
-            logger: 日志记录器对象，若为空则自行创建
+            skip_exists: 如果设为True，则跳过OSS上已有的文件
+            logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.OSSUploader"作为logger名，否则使用"OSSUploader"
             log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
         self.input_json = Path(input_json)
@@ -740,13 +743,12 @@ class OSSUploader:
         self.access_key_id = access_key_id
         self.access_key_secret = access_key_secret
         self.num_processes = num_processes
+        self.skip_exists = skip_exists
         self.log_file = Path(log_file) if log_file else None
+        self.logger_suffix = logger_suffix
         
         # 设置logger
-        if logger is None:
-            self._setup_logger()
-        else:
-            self.logger = logger
+        self._setup_logger()
         
         # 初始化OSS客户端
         try:
@@ -764,6 +766,7 @@ class OSSUploader:
         self.total_files = 0
         self.success_count = 0
         self.failed_count = 0
+        self.skipped_count = 0
         self.uploaded_urls = []
     
     def _load_file_list(self) -> List[str]:
@@ -788,6 +791,52 @@ class OSSUploader:
             self.logger.error(f"读取JSON文件失败: {e}")
             return []
     
+    def _check_file_match(self, local_path: Path, object_name: str) -> bool:
+        """
+        检查本地文件与OSS上的文件是否匹配
+        
+        Args:
+            local_path: 本地文件路径
+            object_name: OSS对象名
+            
+        Returns:
+            bool: 如果文件匹配返回True，否则返回False
+        """
+        try:
+            # 获取本地文件信息
+            local_stat = local_path.stat()
+            local_size = local_stat.st_size
+            local_mtime = local_stat.st_mtime
+            
+            # 获取OSS文件信息
+            oss_meta = self.bucket.get_object_meta(object_name)
+            
+            # 检查文件大小
+            oss_size = int(oss_meta.headers.get('Content-Length', 0))
+            if local_size != oss_size:
+                self.logger.debug(f"文件大小不匹配: 本地={local_size}, OSS={oss_size}")
+                return False
+            
+            # 检查最后修改时间（如果OSS有Last-Modified信息）
+            last_modified = oss_meta.headers.get('Last-Modified')
+            if last_modified:
+                # 将Last-Modified字符串转换为时间戳
+                from email.utils import parsedate_to_datetime
+                import datetime
+                oss_mtime = parsedate_to_datetime(last_modified).timestamp()
+                
+                # 允许1秒的时间差（由于时间精度问题）
+                if abs(local_mtime - oss_mtime) > 1:
+                    self.logger.debug(f"修改时间不匹配: 本地={local_mtime}, OSS={oss_mtime}")
+                    return False
+            
+            self.logger.debug(f"文件匹配: {object_name} (大小: {local_size}, 时间: {local_mtime})")
+            return True
+            
+        except Exception as e:
+            self.logger.debug(f"检查文件匹配失败 {object_name}: {e}")
+            return False
+    
     def _upload_single_file(self, task):
         """上传单个文件到OSS
         返回: (idx, success_bool, message, url)
@@ -803,6 +852,23 @@ class OSSUploader:
             # 检查文件是否存在
             if not file_path_obj.exists():
                 return idx, False, "本地文件不存在", ""
+            
+            # 如果skip_exists为True，检查OSS上是否已存在该文件
+            if self.skip_exists:
+                try:
+                    # 检查对象是否存在
+                    exists = self.bucket.object_exists(object_name)
+                    if exists:
+                        if self._check_file_match(file_path_obj, object_name):
+                            # 文件匹配，生成URL并跳过上传
+                            url = self.bucket.sign_url('GET', object_name, 86400)
+                            return idx, True, "文件已存在且匹配，跳过上传", url
+                        else:
+                            # 文件不匹配，重新上传
+                            self.logger.info(f"文件 {object_name} 存在但不匹配，重新上传")
+                except Exception as e:
+                    self.logger.debug(f"检查OSS文件存在性失败 {object_name}: {e}")
+                    # 如果检查失败，继续正常上传流程
             
             # 上传文件到OSS
             self.logger.debug(f"上传文件: {file_path} -> {object_name}")
@@ -859,9 +925,12 @@ class OSSUploader:
                 processed += 1
                 
                 if task_success:
-                    self.success_count += 1
+                    if "跳过上传" in message:
+                        self.skipped_count += 1
+                    else:
+                        self.success_count += 1
+                        status = "✓"      # 实际上传成功
                     self.uploaded_urls[idx] = url
-                    status = "✓"
                 else:
                     self.failed_count += 1
                     status = "✗"
@@ -875,7 +944,7 @@ class OSSUploader:
                 
                 # 每处理10个文件显示一次汇总
                 if processed % 10 == 0:
-                    summary = f"[进度] {processed}/{total} ({progress:.1f}%) | 成功: {self.success_count} | 失败: {self.failed_count}"
+                    summary = f"[进度] {processed}/{total} ({progress:.1f}%) | 成功: {self.success_count} | 跳过: {self.skipped_count} | 失败: {self.failed_count}"
                     self.logger.info(summary)
                     
                     if processed > 0:
@@ -902,6 +971,7 @@ class OSSUploader:
         self.logger.info("=" * 60)
         self.logger.info(f"总文件数: {self.total_files}")
         self.logger.info(f"上传成功: {self.success_count}")
+        self.logger.info(f"跳过上传: {self.skipped_count}")
         self.logger.info(f"上传失败: {self.failed_count}")
         self.logger.info(f"总耗时: {time.strftime('%H:%M:%S', time.gmtime(total_time))}")
         
@@ -911,7 +981,8 @@ class OSSUploader:
         return self.success_count > 0
     
     def _setup_logger(self):
-        self.logger = logging.getLogger("OSSUploader")
+        logger_name = f"{self.logger_suffix}.OSSUploader" if self.logger_suffix else "OSSUploader"
+        self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(logging.INFO)
         
         if not self.logger.handlers:
@@ -948,7 +1019,7 @@ class AudioTranscriber:
     """音频转文字类"""
     
     def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], text_dir: Union[str, Path], 
-                 model_api_key: str, num_processes: int = 1, logger=None, log_file: Union[str, Path] = None):
+                 model_api_key: str, num_processes: int = 1, logger_suffix: str = None, log_file: Union[str, Path] = None):
         """
         初始化音频转录器
         
@@ -958,7 +1029,7 @@ class AudioTranscriber:
             text_dir: 存放音频转写生成的文字文件的文件夹
             model_api_key: Fun-ASR模型API key
             num_processes: 并行进程数，默认为1
-            logger: 日志记录器对象，若为空则自行创建
+            logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.AudioTranscriber"作为logger名，否则使用"AudioTranscriber"
             log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
         self.input_json = Path(input_json)
@@ -967,12 +1038,10 @@ class AudioTranscriber:
         self.model_api_key = model_api_key
         self.num_processes = num_processes
         self.log_file = Path(log_file) if log_file else None
+        self.logger_suffix = logger_suffix
         
         # 设置logger
-        if logger is None:
-            self._setup_logger()
-        else:
-            self.logger = logger
+        self._setup_logger()
         
         # 初始化统计信息
         self.total_urls = 0
@@ -1283,16 +1352,18 @@ class AudioTranscriber:
             text_filename = f"{idx+1:03d}.txt"
             text_path = self.text_dir / text_filename
             
+            # 如果转录结果为空，添加空字符串到输出列表
+            if not result_text.strip():
+                self.text_file_paths.append("")
+                self.failed_count += 1
+                continue
+                
             try:
                 with open(str(text_path), 'w', encoding='utf-8') as f:
                     f.write(result_text)
                 
                 self.text_file_paths.append(str(text_path))
-                
-                if result_text.strip():
-                    self.success_count += 1
-                else:
-                    self.failed_count += 1
+                self.success_count += 1
                     
             except Exception as e:
                 self.logger.error(f"保存文本文件失败 {text_filename}: {e}")
@@ -1325,7 +1396,8 @@ class AudioTranscriber:
         return self.success_count > 0
     
     def _setup_logger(self):
-        self.logger = logging.getLogger("AudioTranscriber")
+        logger_name = f"{self.logger_suffix}.AudioTranscriber" if self.logger_suffix else "AudioTranscriber"
+        self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(logging.DEBUG)  # 设置为DEBUG以记录调试信息
         
         if not self.logger.handlers:
@@ -1362,7 +1434,7 @@ class TextSummarizer:
     """总结文字类"""
     
     def __init__(self, input_json: Union[str, Path], output_json: Union[str, Path], summary_dir: Union[str, Path], 
-                 model_api_key: str, num_processes: int = 1, origin_json: Union[str, Path] = None, logger=None, 
+                 model_api_key: str, num_processes: int = 1, origin_json: Union[str, Path] = None, logger_suffix: str = None, 
                  log_file: Union[str, Path] = None):
         """
         初始化文本总结器
@@ -1374,7 +1446,7 @@ class TextSummarizer:
             model_api_key: Deepseek模型API key
             num_processes: 并行进程数，默认为1
             origin_json: 包含每个文本文件对应的原视频路径的列表的JSON文件路径，若为空则不在生成的总结头部添加原视频路径
-            logger: 日志记录器对象，若为空则自行创建
+            logger_suffix: logger名称后缀，如果给出，则使用f"{logger_suffix}.TextSummarizer"作为logger名，否则使用"TextSummarizer"
             log_file: 自定义日志文件路径，若不为None则将日志输出到此文件
         """
         self.input_json = Path(input_json)
@@ -1384,12 +1456,10 @@ class TextSummarizer:
         self.num_processes = num_processes
         self.origin_json = Path(origin_json) if origin_json else None
         self.log_file = Path(log_file) if log_file else None
+        self.logger_suffix = logger_suffix
         
         # 设置logger
-        if logger is None:
-            self._setup_logger()
-        else:
-            self.logger = logger
+        self._setup_logger()
         
         # 初始化统计信息
         self.total_texts = 0
@@ -1627,7 +1697,8 @@ class TextSummarizer:
         return self.success_count > 0
     
     def _setup_logger(self):
-        self.logger = logging.getLogger("TextSummarizer")
+        logger_name = f"{self.logger_suffix}.TextSummarizer" if self.logger_suffix else "TextSummarizer"
+        self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(logging.INFO)
         
         if not self.logger.handlers:

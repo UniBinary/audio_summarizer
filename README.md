@@ -103,13 +103,29 @@ pip install .
 ```bash
 # 基本用法（使用配置文件）
 audiosummarizer --input-dir /path/to/videos --output-dir /path/to/output --config-file config.json
+# 或使用短别名
+audiosummarizer -i /path/to/videos -o /path/to/output -c config.json
 
 # 指定进程数
 audiosummarizer --input-dir /path/to/videos --output-dir /path/to/output --processes 4 --config-file config.json
+# 或使用短别名
+audiosummarizer -i /path/to/videos -o /path/to/output -p 4 -c config.json
 
 # 仅音频模式（输入目录只有音频文件）
 audiosummarizer --input-dir /path/to/audios --output-dir /path/to/output --audio-only --config-file config.json
+# 或使用短别名
+audiosummarizer -i /path/to/audios -o /path/to/output -a -c config.json
 ```
+
+### 命令行参数说明
+
+| 长参数 | 短别名 | 是否必需 | 类型 | 默认值 | 说明 |
+|--------|--------|----------|------|--------|------|
+| `--config-file` | `-c` | 是 | 字符串 | 无 | 配置文件路径，包含API密钥等配置信息 |
+| `--input-dir` | `-i` | 是 | 字符串 | 无 | 包含音视频文件的输入目录路径 |
+| `--output-dir` | `-o` | 是 | 字符串 | 无 | 总结输出文件夹路径 |
+| `--processes` | `-p` | 否 | 整数 | 1 | 同时处理的进程数 |
+| `--audio-only` | `-a` | 否 | 布尔值 | False | 如果设置，则不提取视频音轨，建议在输入文件夹中只有音频时设置 |
 
 ### Python API方式
 

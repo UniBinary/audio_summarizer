@@ -9,7 +9,7 @@ if readme.exists():
 
 setup(
     name="audio_summarizer",                 # 包名，发布到 PyPI 时使用
-    version="1.1.1",                         # 初始版本号，发布前更新
+    version="1.2",                         # 初始版本号，发布前更新
     description="一个用于总结音频文件和视频音轨的内容的工具。",  # 简短描述
     long_description=long_description,
     long_description_content_type="text/markdown",
