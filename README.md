@@ -2,7 +2,7 @@
 
 一个用于自动处理音视频文件并生成文字总结的Python工具。
 
-版本：**Version 1 Hotfix 1** 的第1次修订 - 1.1.1
+版本：**Version 1 Subversion 2** - 1.2
 
 ## 🚀 功能特点
 
