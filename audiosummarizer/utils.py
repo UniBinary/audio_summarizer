@@ -996,7 +996,7 @@ class OSSUploader:
                     self.logger.debug(f"文件哈希值匹配: {object_name} (MD5: {local_md5})")
                     return True
                 else:
-                    # 哈希值不匹配，但文件大小相近
+                    # 哈希值不匹配
                     self.logger.debug(f"文件哈希值不匹配")
                     return False
             else:
