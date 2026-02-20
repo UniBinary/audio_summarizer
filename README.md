@@ -14,6 +14,39 @@
 - ⚡ **高性能**：支持多进程并行处理，提高处理速度
 - 📋 **完整日志**：详细的处理日志和进度显示
 
+## ✨ 1.2版本新特性
+- 在github release上可以看到更详细的更新日志，这里只列出主要功能点：
+
+### ⌨️ **命令行参数增强**
+- 为所有主要参数添加短别名，使用更便捷：`-c`, `-i`, `-o`, `-p`, `-a`, `-l`
+- 新增 `--log-level` 参数支持动态调整日志级别
+
+### 🛡️ **增强错误处理**
+- 优化音频提取失败处理逻辑，当所有音频提取失败时程序会提前终止
+- 提供明确的错误提示，避免在完全没有音频的情况下继续执行后续步骤
+
+### 📁 **文件过滤功能**
+- 新增文件大小和时长限制支持，可过滤过大或过长的音视频文件
+- 支持按需过滤，提高处理效率
+
+### ☁️ **OSS上传优化**
+- 新增 `skip_exists` 参数，支持跳过已存在的OSS文件
+- 减少不必要的上传，节省时间和流量
+
+### 📝 **文本总结优化**
+- 智能跳过已存在的总结文件，避免重复工作
+- 提高批量处理效率
+
+### 🌐 **跨平台兼容性优化**
+- 优化ffprobe可执行文件路径查找逻辑，提高跨平台兼容性
+- 根据操作系统平台动态选择正确的可执行文件名和安装路径
+- 更好的支持Windows、macOS和Linux系统
+
+### 🔧 **接口改进**
+- 统一OSS配置键名：`aliyun_access_key_id` 和 `aliyun_access_key_secret`
+- 简化logger配置，使用 `logger_suffix` 参数
+- 增强参数验证，自动过滤无效路径
+
 ## ✨ 1.1版本新特性
 - 在github release上可以看到更详细的更新日志，这里只列出主要功能点：
 
@@ -90,7 +123,9 @@ pip install .
   "bucket_access_key_id": "your-access-key-id",
   "bucket_access_key_secret": "your-access-key-secret",
   "funasr_api_key": "your-funasr-api-key",
-  "deepseek_api_key": "your-deepseek-api-key"
+  "deepseek_api_key": "your-deepseek-api-key",
+  "ffmpeg_path": "path/to/ffmpeg",
+  "ffprobe_path": "path/to/ffprobe"
 }
 ```
 
@@ -115,6 +150,11 @@ audiosummarizer -i /path/to/videos -o /path/to/output -p 4 -c config.json
 audiosummarizer --input-dir /path/to/audios --output-dir /path/to/output --audio-only --config-file config.json
 # 或使用短别名
 audiosummarizer -i /path/to/audios -o /path/to/output -a -c config.json
+
+# 将日志级别设为Warning
+audiosummarizer --input-dir /path/to/videos --output-dir /path/to/output --log-level warning --config-file config.json
+# 或使用短别名
+audiosummarizer -i /path/to/videos -o /path/to/output -l warning -c config.json
 ```
 
 ### 命令行参数说明
@@ -126,6 +166,7 @@ audiosummarizer -i /path/to/audios -o /path/to/output -a -c config.json
 | `--output-dir` | `-o` | 是 | 字符串 | 无 | 总结输出文件夹路径 |
 | `--processes` | `-p` | 否 | 整数 | 1 | 同时处理的进程数 |
 | `--audio-only` | `-a` | 否 | 布尔值 | False | 如果设置，则不提取视频音轨，建议在输入文件夹中只有音频时设置 |
+| `--log-level` | `-l` | 否 | 字符串 | info | 日志级别（debug, info, warning, error, critical） |
 
 ### Python API方式
 
@@ -144,7 +185,9 @@ config = {
     "bucket_access_key_id": "your-access-key-id",
     "bucket_access_key_secret": "your-access-key-secret",
     "funasr_api_key": "your-funasr-api-key",
-    "deepseek_api_key": "your-deepseek-api-key"
+    "deepseek_api_key": "your-deepseek-api-key",
+    "ffmpeg_path": "path/to/ffmpeg",
+    "ffprobe_path": "path/to/ffprobe"
 }
 
 # 使用配置文件

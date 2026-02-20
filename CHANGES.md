@@ -1,121 +1,85 @@
-# 修改记录
+# Audio Summarizer 更新说明
+- 上个版本：**Version 1 Subversion 1 Hotfix 1** - 1.1.1
+- 现版本：**Version 1 Subversion 2** - 1.2
+- 该包已发布至同名PyPI项目
 
-## 2026-02-20: 跨平台兼容性修复
+## 1. 功能增强
 
-### 修改内容
-修复了`audiosummarizer/utils.py`文件中不符合跨平台原则的代码，特别是硬编码的Windows可执行文件扩展名和路径。
+### 命令行参数增强
+- 上个版本：命令行参数只有长格式，使用不便。
+- 现版本：为所有主要命令行参数添加短别名，提升用户体验：
+  - `--config-file` → `-c`
+  - `--input-dir` → `-i`
+  - `--output-dir` → `-o`
+  - `--processes` → `-p`
+  - `--audio-only` → `-a`
+  - `--log-level` → `-l`
 
-### 具体修改
+### 日志系统增强
+- 上个版本：日志级别固定，无法动态调整。
+- 现版本：添加 `--log-level` 参数支持，用户可以在运行时指定日志级别（debug/info/warning/error/critical）。
 
-#### 1. 修复 `_get_file_duration` 方法中的ffprobe路径查找
-**修改前:**
-```python
-possible_paths = [
-    Path("ffprobe.exe"),
-    Path("ffprobe"),
-    Path(r"C:\ffmpeg\bin\ffprobe.exe"),
-    Path(r"C:\Program Files\ffmpeg\bin\ffprobe.exe"),
-    Path(r"D:\ffmpeg\bin\ffprobe.exe"),
-]
-```
+### 文件过滤功能
+- 上个版本：无法过滤过大或过长的音视频文件。
+- 现版本：`AVFinder` 类新增 `size_limit` 和 `duration_limit` 参数，支持按文件大小和时长过滤音视频文件。
 
-**修改后:**
-```python
-possible_paths = []
-possible_paths.append(Path("ffprobe"))
+### 音频提取失败处理优化
+- 上个版本：当所有音频提取失败时，程序仍会继续执行后续步骤，可能导致错误。
+- 现版本：优化音频提取失败处理逻辑，当所有音频提取失败时，`AudioExtractor.process_videos()`方法会返回`False`，程序会提前终止并给出明确错误提示。
 
-if sys.platform == "win32":
-    possible_paths.append(Path("ffprobe.exe"))
+### OSS上传优化
+- 上个版本：每次运行都会重新上传所有文件，即使文件已存在。
+- 现版本：`OSSUploader` 类新增 `skip_exists` 参数，支持跳过已存在的OSS文件，减少不必要的上传。
 
-common_paths = []
-if sys.platform == "win32":
-    common_paths = [
-        Path(r"C:\ffmpeg\bin\ffprobe.exe"),
-        Path(r"C:\Program Files\ffmpeg\bin\ffprobe.exe"),
-        Path(r"D:\ffmpeg\bin\ffprobe.exe"),
-    ]
-elif sys.platform == "darwin":
-    common_paths = [
-        Path("/usr/local/bin/ffprobe"),
-        Path("/opt/homebrew/bin/ffprobe"),
-    ]
-else:
-    common_paths = [
-        Path("/usr/bin/ffprobe"),
-        Path("/usr/local/bin/ffprobe"),
-    ]
+### 文本总结优化
+- 上个版本：每次运行都会重新生成所有文本总结，即使总结文件已存在。
+- 现版本：`TextSummarizer` 类新增文件跳过逻辑，如果总结文件已存在且内容有效，则跳过该文件的总结过程。
 
-possible_paths.extend(common_paths)
-```
+## 2. 接口改进
 
-#### 2. 修复 `_get_duration` 方法中的ffprobe路径查找
-**修改前:**
-```python
-ffprobe_path = self.ffmpeg_path.parent / "ffprobe.exe"
-if not ffprobe_path.exists():
-    ffprobe_path = self.ffmpeg_path.with_name("ffprobe.exe")
-```
+### 配置键名标准化
+- 上个版本：OSS配置键名不一致，使用 `bucket_access_key_id` 和 `bucket_access_key_secret`。
+- 现版本：统一OSS配置键名为 `aliyun_access_key_id` 和 `aliyun_access_key_secret`，提高配置一致性。
 
-**修改后:**
-```python
-ffprobe_path = None
-possible_names = ["ffprobe"]
-if sys.platform == "win32":
-    possible_names.append("ffprobe.exe")
+### Logger接口改进
+- 上个版本：类构造函数直接接受logger实例，导致logger配置复杂。
+- 现版本：所有类改为接受 `logger_suffix` 参数，内部自动创建带标签的logger，简化logger配置。
 
-for name in possible_names:
-    test_path = self.ffmpeg_path.parent / name
-    if test_path.exists():
-        ffprobe_path = test_path
-        break
-    
-    test_path = self.ffmpeg_path.with_name(name)
-    if test_path.exists():
-        ffprobe_path = test_path
-        break
+### 参数验证增强
+- 上个版本：输入JSON中的空字符串路径可能导致错误。
+- 现版本：`AudioExtractor` 类添加空字符串路径过滤，自动跳过无效路径。
 
-if ffprobe_path is None:
-    ffprobe_path = Path("ffprobe")
-```
+## 3. 跨平台兼容性
 
-### 跨平台支持
-- **Windows**: 支持 `.exe` 扩展名和Windows特定路径
-- **macOS**: 支持Homebrew安装路径 (`/usr/local/bin`, `/opt/homebrew/bin`)
-- **Linux/Unix**: 支持标准Unix路径 (`/usr/bin`, `/usr/local/bin`)
+### 跨平台路径查找优化
+- 上个版本：ffprobe可执行文件路径查找逻辑中包含硬编码的Windows路径和`.exe`扩展名。
+- 现版本：优化ffprobe路径查找逻辑，根据当前操作系统平台动态选择正确的可执行文件名和常见安装路径：
+  - **Windows**: 支持 `.exe` 扩展名和常见安装路径
+  - **macOS**: 支持Homebrew安装路径 (`/usr/local/bin`, `/opt/homebrew/bin`)
+  - **Linux**: 支持标准Unix路径 (`/usr/bin`, `/usr/local/bin`)
 
-### 影响
-- 代码现在可以在Windows、macOS和Linux上正确运行
-- ffprobe可执行文件的查找逻辑现在是平台感知的
-- 移除了硬编码的Windows特定假设，提高了代码的可移植性
+## 4. Bug修复
 
-## 2026-02-20: 修改AudioExtractor类的process_videos()方法
+### 跨平台兼容性修复
+- 修复了 `AVFinder._get_file_duration()` 方法中的ffprobe路径查找逻辑。
+- 修复了 `AudioExtractor._get_duration()` 方法中的ffprobe路径查找逻辑。
 
-### 修改内容
-修改了`audiosummarizer/utils.py`文件中的`AudioExtractor.process_videos()`方法，当所有音频都提取失败时返回False。
+### 音频提取错误处理修复
+- 修复了当所有音频文件提取失败时，程序仍会继续执行的问题。
 
-### 具体修改
-在`process_videos()`方法的最后部分，添加了以下检查逻辑：
+### 子进程日志修复
+- 修复了在多进程环境下子进程logger配置问题，确保子进程也能正确记录日志。
 
-```python
-# 检查是否所有音频都提取失败
-if self.success_count == 0 and self.failed_count > 0:
-    self.logger.error("所有音频提取都失败了！")
-    return False
-```
+### 文件验证修复
+- 改进了 `AudioExtractor._check_audio_correct()` 方法的日志输出，提供更详细的验证信息。
 
-### 逻辑说明
-- 当`success_count == 0`且`failed_count > 0`时，表示所有音频提取都失败了，返回False
-- 其他情况（包括有成功提取、全部跳过、或没有文件）都返回True
+## 5. 性能优化
 
-### 测试用例
-1. **所有音频提取失败**：返回False
-2. **部分成功，部分失败**：返回True（因为有成功提取）
-3. **所有文件都是音频文件（全部跳过）**：返回True
-4. **混合情况：跳过和成功**：返回True
-5. **混合情况：跳过和失败**：返回False（因为没有成功提取）
-6. **没有文件**：返回True（边缘情况）
+### 减少重复工作
+- OSS上传支持跳过已存在的文件
+- 文本总结支持跳过已存在的总结文件
+- 音频提取支持验证已存在的音频文件正确性
 
-### 影响
-- 当所有音频提取失败时，`process_videos()`会返回False
-- 在`main.py`中，这会触发错误日志"提取音频失败"并退出程序
-- 这提供了更好的错误处理，避免了在完全没有音频的情况下继续执行后续步骤
+### 内存优化
+- 改进空字符串路径过滤，减少无效数据处理
+- 优化文件列表加载和验证逻辑
