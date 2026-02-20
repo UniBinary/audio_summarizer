@@ -182,14 +182,40 @@ class AVFinder:
             # 使用ffprobe获取时长
             ffprobe_cmd = None
             
-            # 尝试不同的ffprobe路径
-            possible_paths = [
-                Path("ffprobe.exe"),
-                Path("ffprobe"),
-                Path(r"C:\ffmpeg\bin\ffprobe.exe"),
-                Path(r"C:\Program Files\ffmpeg\bin\ffprobe.exe"),
-                Path(r"D:\ffmpeg\bin\ffprobe.exe"),
-            ]
+            # 尝试不同的ffprobe路径（跨平台）
+            possible_paths = []
+            
+            # 首先尝试PATH环境变量中的ffprobe
+            possible_paths.append(Path("ffprobe"))
+            
+            # 在Windows上，也尝试带.exe扩展名
+            if sys.platform == "win32":
+                possible_paths.append(Path("ffprobe.exe"))
+            
+            # 尝试常见的安装位置（跨平台）
+            common_paths = []
+            
+            if sys.platform == "win32":
+                # Windows常见路径
+                common_paths = [
+                    Path(r"C:\ffmpeg\bin\ffprobe.exe"),
+                    Path(r"C:\Program Files\ffmpeg\bin\ffprobe.exe"),
+                    Path(r"D:\ffmpeg\bin\ffprobe.exe"),
+                ]
+            elif sys.platform == "darwin":  # macOS
+                # macOS常见路径（通过Homebrew安装）
+                common_paths = [
+                    Path("/usr/local/bin/ffprobe"),
+                    Path("/opt/homebrew/bin/ffprobe"),
+                ]
+            else:  # Linux和其他Unix-like系统
+                # Linux常见路径
+                common_paths = [
+                    Path("/usr/bin/ffprobe"),
+                    Path("/usr/local/bin/ffprobe"),
+                ]
+            
+            possible_paths.extend(common_paths)
             
             for probe_path in possible_paths:
                 if probe_path.exists():
@@ -539,10 +565,31 @@ class AudioExtractor:
     def _get_duration(self, file_path):
         """获取媒体文件时长（秒）"""
         try:
-            # 使用ffprobe获取时长
-            ffprobe_path = self.ffmpeg_path.parent / "ffprobe.exe"
-            if not ffprobe_path.exists():
-                ffprobe_path = self.ffmpeg_path.with_name("ffprobe.exe")
+            # 使用ffprobe获取时长（跨平台）
+            # 首先尝试在ffmpeg同一目录下找ffprobe
+            ffprobe_path = None
+            
+            # 可能的ffprobe文件名（考虑平台扩展名）
+            possible_names = ["ffprobe"]
+            if sys.platform == "win32":
+                possible_names.append("ffprobe.exe")
+            
+            for name in possible_names:
+                # 尝试在ffmpeg同一目录下
+                test_path = self.ffmpeg_path.parent / name
+                if test_path.exists():
+                    ffprobe_path = test_path
+                    break
+                
+                # 尝试将ffmpeg文件名替换为ffprobe
+                test_path = self.ffmpeg_path.with_name(name)
+                if test_path.exists():
+                    ffprobe_path = test_path
+                    break
+            
+            # 如果以上都没找到，尝试使用PATH中的ffprobe
+            if ffprobe_path is None:
+                ffprobe_path = Path("ffprobe")
             
             cmd = [
                 str(ffprobe_path),
@@ -871,6 +918,11 @@ class AudioExtractor:
         
         # 检查输出目录内容
         self._check_output_directory()
+        
+        # 检查是否所有音频都提取失败
+        if self.success_count == 0 and self.failed_count > 0:
+            self.logger.error("所有音频提取都失败了！")
+            return False
         
         # 只要没有发生完全失败（如加载列表失败、写入JSON失败），就返回True
         # 即使有文件处理失败，也返回True，因为失败的文件已在输出JSON中留空

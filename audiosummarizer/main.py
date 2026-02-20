@@ -216,8 +216,8 @@ def summarize(config: dict[str, str],
     try:
         bucket_name = config["bucket_name"]
         bucket_endpoint = config["bucket_endpoint"]
-        access_key_id = config["bucket_access_key_id"]
-        access_key_secret = config["bucket_access_key_secret"]
+        access_key_id = config["aliyun_access_key_id"]
+        access_key_secret = config["aliyun_access_key_secret"]
         funasr_api_key = config["funasr_api_key"]
         deepseek_api_key = config["deepseek_api_key"]
         ffmpeg_path = Path(config["ffmpeg_path"])
